@@ -2,7 +2,7 @@
 collections:
   - name: ansible.posix
     version: ">=2.2.2"
-  # CA / เซ็น cert บน control node (roles/tls) — ต้องมี python "cryptography" ใน venv ของ Ansible
-  # ansible-core 2.16 (มี node EL8) ใช้ 2.x:  ansible-galaxy collection install 'community.crypto:>=2.22.0,<3.0.0'
+  # CA / certificate signing on the control node (roles/tls) — needs python "cryptography" in the Ansible venv
+  # ansible-core 2.16 (EL8 nodes) needs 2.x:  ansible-galaxy collection install 'community.crypto:>=2.22.0,<3.0.0'
   - name: community.crypto
     version: ">=2.22.0"

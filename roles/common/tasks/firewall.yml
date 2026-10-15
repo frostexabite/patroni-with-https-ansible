@@ -1,6 +1,6 @@
 ---
-# Internal ports: เปิดเฉพาะจาก subnet ของ cluster
-# Client ports  : เปิดให้ subnet ของ application (HAProxy write/read + stats)
+# Internal ports: open only to the cluster subnet
+# Client ports  : open to the application subnets (HAProxy write/read + stats)
 - name: Install firewalld
   ansible.builtin.dnf:
     name: firewalld
@@ -44,8 +44,8 @@
     state: enabled
   when: keepalived_on | bool
 
-# ---- ลบ rule ค้างจาก subnet เดิม (เช่นเคยรันด้วย CIDR ผิดแล้วแก้ทีหลัง) ----
-# แตะเฉพาะ rich rule ที่เป็น port/VRRP ของ cluster นี้และมี source ไม่อยู่ใน subnet ที่อนุญาต
+# ---- Remove stale rules from old subnets (e.g. after running with a wrong CIDR and fixing it) ----
+# Touches only rich rules for this cluster's ports/VRRP whose source is outside the allowed subnets
 - name: List permanent rich rules
   ansible.builtin.command: firewall-cmd --permanent --list-rich-rules
   register: common_fw_rules

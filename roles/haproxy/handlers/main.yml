@@ -1,5 +1,5 @@
 ---
-# reload แบบ master-worker: master re-exec ตัวเอง จึงได้ binary ใหม่ด้วยโดยไม่ตัด connection เดิม
+# master-worker reload: the master re-execs itself, so it also picks up a new binary without dropping existing connections
 - name: Save HAProxy server state before reload
   ansible.builtin.shell: >-
     set -o pipefail;

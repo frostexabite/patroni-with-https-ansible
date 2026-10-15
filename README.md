@@ -1,10 +1,10 @@
 # PostgreSQL HA Cluster on Rocky Linux / RHEL 8 · 9 · 10 — Patroni + etcd + HAProxy + keepalived (Ansible)
 
-Ansible project สำหรับติดตั้ง PostgreSQL High Availability แบบ **stacked topology** (ทุก node รันครบทุก component)
-ดัดแปลงจากบทความ *Building a Highly Available PostgreSQL Cluster with Patroni, etcd, and HAProxy (Oracle Linux 8 & PostgreSQL 16)*
-ของ Foyez Ahmed Rony ให้รันได้บน **Rocky Linux และ Red Hat Enterprise Linux ทุก version ที่ยังมี support (8, 9, 10)**
-ด้วยเวอร์ชันล่าสุดของทุก component — IP, subnet และ VIP เป็นค่าที่คุณใส่เอง (ไม่มีค่าฝังในโค้ด)
-และเข้ารหัสทุกช่องทางด้วย **TLS จาก CA ของ cluster เอง** (app, replication, Patroni REST API, etcd, HAProxy stats)
+An Ansible project that installs PostgreSQL High Availability as a **stacked topology** (every node runs every component).
+It is adapted from the article *Building a Highly Available PostgreSQL Cluster with Patroni, etcd, and HAProxy (Oracle Linux 8 & PostgreSQL 16)*
+by Foyez Ahmed Rony, and runs on **every supported Rocky Linux and Red Hat Enterprise Linux release (8, 9, 10)**
+with the latest version of every component. IPs, subnets and the VIP are values you enter yourself (nothing is hard-coded),
+and every channel is encrypted with **TLS from a cluster-owned CA** (applications, replication, Patroni REST API, etcd, HAProxy stats).
 
 ```
                          Application
@@ -23,87 +23,87 @@ Ansible project สำหรับติดตั้ง PostgreSQL High Availabi
    <IP-node-1>          <IP-node-2>          <IP-node-3>
 ```
 
-ชื่อ node และจำนวน node (3, 5, 7, ...) เปลี่ยนได้ตอนใส่ค่า
+Node names and the number of nodes (3, 5, 7, ...) are chosen when you enter the site values.
 
-## OS ที่รองรับ
+## Supported operating systems
 
-| OS | Python ของระบบ (Ansible ใช้) | Python ของ Patroni | PostgreSQL 18 (`pg_install_source: auto`) | ansible-core บน control node |
+| OS | System Python (used by Ansible) | Patroni Python | PostgreSQL 18 (`pg_install_source: auto`) | ansible-core on the control node |
 |---|---|---|---|---|
-| Rocky Linux / RHEL **8** (8.10) | platform-python 3.6 | `python3.12` จาก AppStream | PGDG (+ ปิด module `postgresql`) | **2.16.x เท่านั้น** |
-| Rocky Linux / RHEL **9** (9.4+) | python3 3.9 | `python3.12` จาก AppStream | PGDG (+ ปิด module `postgresql`) | 2.16 – 2.21 |
+| Rocky Linux / RHEL **8** (8.10) | platform-python 3.6 | `python3.12` from AppStream | PGDG (+ `postgresql` module disabled) | **2.16.x only** |
+| Rocky Linux / RHEL **9** (9.4+) | python3 3.9 | `python3.12` from AppStream | PGDG (+ `postgresql` module disabled) | 2.16 – 2.21 |
 | Rocky Linux / RHEL **10** | python3 3.12 | `python3` (3.12) | AppStream `postgresql18` | 2.16 – 2.21 |
 
-- AlmaLinux และ Oracle Linux 8/9/10 ใช้ได้เหมือนกัน (ID `almalinux`, `ol`)
-- ทุก node ใน cluster ต้องเป็น major version เดียวกัน (glibc/collation ต้องตรงกันสำหรับ streaming replication)
-- RHEL ต้อง register (`subscription-manager register`) และเปิด BaseOS + AppStream
-- **EL8**: ansible-core 2.17 ขึ้นไปจัดการ Python 3.6 ไม่ได้ และ binding ของ dnf บน EL8 มีเฉพาะ Python 3.6 จึงต้องใช้ ansible-core 2.16
-  (preflight ตรวจและแจ้งให้)
-- RHEL/CentOS 7 ไม่รองรับ — หมดอายุแล้ว, ไม่มี Python ≥ 3.10 สำหรับ psycopg 3.3 (Rocky Linux ไม่มีเวอร์ชัน 7)
+- AlmaLinux and Oracle Linux 8/9/10 work the same way (IDs `almalinux`, `ol`)
+- All nodes in a cluster must run the same major version (glibc/collation must match for streaming replication)
+- RHEL must be registered (`subscription-manager register`) with BaseOS + AppStream enabled
+- **EL8**: ansible-core 2.17+ cannot manage Python 3.6, and EL8's dnf bindings exist only for Python 3.6, so ansible-core 2.16 is required
+  (preflight checks this and tells you)
+- RHEL/CentOS 7 is not supported — end of life, and no Python ≥ 3.10 for psycopg 3.3 (Rocky Linux has no version 7)
 
-project เลือกค่าที่ต่างกันตาม OS ให้อัตโนมัติ (`playbooks/detect_os.yml` + `inventory/group_vars/all/main.yml`)
-ปรับเองได้ผ่าน `os_system_python`, `patroni_python_by_major`, `pg_install_source`
+The project picks the OS-specific values automatically (`playbooks/detect_os.yml` + `inventory/group_vars/all/main.yml`).
+Override them with `os_system_python`, `patroni_python_by_major`, `pg_install_source`.
 
-## เวอร์ชัน (ล่าสุด ณ 12 ต.ค. 2026)
+## Versions (latest as of 12 Oct 2026)
 
-| Component  | Version | ติดตั้งจาก | ตัวแปร |
+| Component  | Version | Installed from | Variable |
 |------------|---------|-----------|--------|
-| OS packages | ล่าสุดเสมอ | `dnf upgrade` + `state: latest` | `os_update_all`, `package_state` |
-| PostgreSQL | **18.6** | EL8/9: PGDG · EL10: AppStream (เลือกเองได้) | `pg_version`, `pg_install_source` |
-| etcd | **3.7.2** | GitHub release + ตรวจ SHA256 | `etcd_version` |
+| OS packages | always latest | `dnf upgrade` + `state: latest` | `os_update_all`, `package_state` |
+| PostgreSQL | **18.6** | EL8/9: PGDG · EL10: AppStream (configurable) | `pg_version`, `pg_install_source` |
+| etcd | **3.7.2** | GitHub release + SHA256 check | `etcd_version` |
 | Patroni | **4.1.5** | PyPI → venv `/opt/patroni` | `patroni_version` |
-| psycopg | **3.3.6** (ต้องใช้ Python ≥ 3.10) | PyPI | `psycopg_version` |
-| HAProxy | **3.4.6** (LTS) | build จาก source (haproxy.org + ตรวจ SHA256) | `haproxy_version` |
-| keepalived | **2.4.3** | build จาก Git tag + ตรวจ commit hash | `keepalived_version` |
-| Ansible | ansible-core 2.16 (มี EL8) / 2.16–2.21 · ansible.posix ≥ 2.2.2 · community.crypto ≥ 2.22 | control node | `requirements.yml` |
+| psycopg | **3.3.6** (needs Python ≥ 3.10) | PyPI | `psycopg_version` |
+| HAProxy | **3.4.6** (LTS) | built from source (haproxy.org + SHA256 check) | `haproxy_version` |
+| keepalived | **2.4.3** | built from a Git tag + commit hash check | `keepalived_version` |
+| Ansible | ansible-core 2.16 (with EL8) / 2.16–2.21 · ansible.posix ≥ 2.2.2 · community.crypto ≥ 2.22 | control node | `requirements.yml` |
 
-PostgreSQL 19 ยังเป็น Beta ณ วันที่จัดทำ จึงใช้ 18
+PostgreSQL 19 was still in Beta at the time of writing, so 18 is used.
 
-## เอกสาร
+## Documentation
 
-| ไฟล์ | เนื้อหา |
+| File | Contents |
 |---|---|
-| [docs/INSTALL.md](docs/INSTALL.md) | ขั้นตอนติดตั้งแบบ copy & paste ตั้งแต่เครื่องเปล่า (Rocky / RHEL) |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | ตรวจสุขภาพ, ตรวจ Patroni, ทดสอบ failover, อัปเกรด, งานประจำ |
-| [docs/TLS.md](docs/TLS.md) | TLS/SSL ด้วย CA ของ cluster: เปิดบน cluster เดิม, connection string ของ app, ต่ออายุ cert |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | ปัญหาที่เจอบ่อยและวิธีแก้ |
-| [CHANGELOG.md](CHANGELOG.md) | สิ่งที่เปลี่ยนในแต่ละเวอร์ชัน |
+| [docs/INSTALL.md](docs/INSTALL.md) | Copy & paste installation from bare machines (Rocky / RHEL) |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Health checks, Patroni checks, failover tests, upgrades, routine work |
+| [docs/TLS.md](docs/TLS.md) | TLS/SSL with the cluster CA: enabling it on an existing cluster, application connection strings, certificate renewal |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common problems and fixes |
+| [CHANGELOG.md](CHANGELOG.md) | Changes in each version |
 
-## เริ่มต้นแบบย่อ
+## Quick start
 
 ```bash
 ansible-galaxy collection install -r requirements.yml
-python3 scripts/setup-inventory.py                       # ถาม IP ของแต่ละ node, subnet, VIP → เขียน inventory/hosts.yml
+python3 scripts/setup-inventory.py                       # asks for each node IP, subnet, VIP → writes inventory/hosts.yml
 cp inventory/group_vars/all/vault.yml.example inventory/group_vars/all/vault.yml
-vi inventory/group_vars/all/vault.yml && ansible-vault encrypt inventory/group_vars/all/vault.yml   # รวม vault_tls_ca_passphrase
-ansible-playbook playbooks/preflight.yml --ask-vault-pass   # ตรวจความพร้อม (ไม่แก้เครื่อง)
-ansible-playbook site.yml --ask-vault-pass                  # ติดตั้ง + verify
+vi inventory/group_vars/all/vault.yml && ansible-vault encrypt inventory/group_vars/all/vault.yml   # includes vault_tls_ca_passphrase
+ansible-playbook playbooks/preflight.yml --ask-vault-pass   # readiness checks (no changes)
+ansible-playbook site.yml --ask-vault-pass                  # install + verify
 ```
 
-cluster ที่ติดตั้งด้วย v1.x / v2.0 (ยังไม่มี TLS): ใช้ `ansible-playbook playbooks/enable-tls.yml --ask-vault-pass`
-แทน `site.yml` ครั้งแรก — ดู [docs/TLS.md](docs/TLS.md)
+Clusters installed with v1.x / v2.0 (no TLS yet): run `ansible-playbook playbooks/enable-tls.yml --ask-vault-pass`
+instead of `site.yml` the first time — see [docs/TLS.md](docs/TLS.md).
 
-## ใส่ IP / subnet / VIP
+## Entering IPs / subnet / VIP
 
-ค่าของไซต์อยู่ที่ `inventory/hosts.yml` ไฟล์เดียว ไฟล์ที่ให้มาเป็น**แม่แบบ** (`<IP-node-1>`, `<VIP>` ...) ใส่ค่าได้ 2 วิธี
+All site values live in one file, `inventory/hosts.yml`. The shipped file is a **template** (`<IP-node-1>`, `<VIP>` ...). There are 2 ways to fill it in.
 
-**1. ถาม-ตอบ (แนะนำ)** — ตรวจความถูกต้องทุกค่า สำรองไฟล์เดิม แล้วเขียนไฟล์ใหม่
+**1. Interactive (recommended)** — validates every value, backs up the old file, then writes a new one
 
 ```bash
 python3 scripts/setup-inventory.py
 ```
 
 ```
-จำนวน node (เลขคี่ >= 3) [3]:
-Node 1  ชื่อ host [pg-node-1]:
+Number of nodes (odd, >= 3) [3]:
+Node 1  host name [pg-node-1]:
 Node 1  IP: 10.10.10.11
 ...
-Subnet ของ cluster (CIDR) [10.10.10.0/24]:
-Subnet ของ application ที่ให้ต่อ DB (คั่นด้วย , ) [10.10.10.0/24]: 10.10.20.0/24
-ใช้ Virtual IP สำหรับ application หรือไม่ [Y/n]:
-VIP (IP ว่างใน 10.10.10.0/24): 10.10.10.10
+Cluster subnet (CIDR) [10.10.10.0/24]:
+Application subnets allowed to reach the DB (comma separated) [10.10.10.0/24]: 10.10.20.0/24
+Use a Virtual IP for applications [Y/n]:
+VIP (an unused IP in 10.10.10.0/24): 10.10.10.10
 ```
 
-รันซ้ำเมื่อไรก็ได้ ค่าเดิมจะเป็นค่า default ในวงเล็บ หรือใส่ทุกค่าในบรรทัดเดียว (ใช้ใน script ได้):
+Re-run it any time — current values become the defaults in brackets. Or pass everything on one line (scriptable):
 
 ```bash
 python3 scripts/setup-inventory.py --ips 10.10.10.11,10.10.10.12,10.10.10.13 --vip 10.10.10.10 --yes
@@ -112,94 +112,94 @@ python3 scripts/setup-inventory.py --nodes db1=10.0.0.11,db2=10.0.0.12,db3=10.0.
 python3 scripts/setup-inventory.py --help
 ```
 
-**2. แก้ไฟล์เอง** — แทนทุกค่าใน `<...>` ของ `inventory/hosts.yml`
+**2. Edit by hand** — replace every `<...>` value in `inventory/hosts.yml`
 
-ไม่ว่าวิธีไหน `preflight` จะตรวจบน control node ก่อน SSH: ยังมี `<...>` เหลือ, IP ผิดรูปแบบ/ซ้ำ, IP หรือ VIP อยู่นอก
-`cluster_network_cidr`, VIP ชนกับ node, จำนวน node ไม่ใช่เลขคี่ จากนั้นตรวจบนเครื่องจริงว่า IP อยู่บน node และ VIP ยังว่าง
+Either way, `preflight` checks on the control node before any SSH: leftover `<...>`, malformed/duplicate IPs, IPs or the VIP outside
+`cluster_network_cidr`, a VIP clashing with a node, an even number of nodes. It then checks on the hosts that each IP is really on its node and that the VIP is free.
 
-**ไฟล์ที่ต้องแก้สำหรับ environment ใหม่มีแค่ 2 ไฟล์**
+**Only 2 files change for a new environment**
 
-| ไฟล์ | ใส่อะไร |
+| File | Contents |
 |---|---|
-| `inventory/hosts.yml` | ชื่อ node, IP, `cluster_network_cidr`, `app_allowed_cidrs`, VIP (`scripts/setup-inventory.py` เขียนให้) |
-| `inventory/group_vars/all/vault.yml` | รหัสผ่านทั้งหมด (เข้ารหัสด้วย ansible-vault) |
+| `inventory/hosts.yml` | node names, IPs, `cluster_network_cidr`, `app_allowed_cidrs`, VIP (written by `scripts/setup-inventory.py`) |
+| `inventory/group_vars/all/vault.yml` | all passwords (encrypted with ansible-vault) |
 
-`inventory/group_vars/all/main.yml` เป็นค่า default/tuning — ไม่ต้องแก้ถ้าไม่ได้ต้องการปรับจูน
-(ค่าของไซต์อย่าใส่ซ้ำในไฟล์นี้ เพราะ `group_vars/all` มี precedence สูงกว่า group vars ใน `hosts.yml`)
+`inventory/group_vars/all/main.yml` holds defaults/tuning — leave it alone unless you want to tune something
+(do not repeat site values there: `group_vars/all` takes precedence over the group vars in `hosts.yml`).
 
-## โครงสร้าง
+## Layout
 
 ```
 .
 ├── ansible.cfg
 ├── requirements.yml                  # ansible.posix, community.crypto
-├── site.yml                          # ตรวจ inventory → detect OS → preflight → roles → verify
+├── site.yml                          # validate inventory → detect OS → preflight → roles → verify
 ├── inventory/
-│   ├── hosts.yml                     # ค่าของไซต์ (แม่แบบ — ใส่ค่าด้วย scripts/setup-inventory.py)
-│   ├── pki/                          # CA ของ cluster (สร้างตอนรันครั้งแรก — ca.key เข้ารหัส, commit ได้)
+│   ├── hosts.yml                     # site values (template — fill in with scripts/setup-inventory.py)
+│   ├── pki/                          # cluster CA (created on the first run — ca.key is encrypted, can be committed)
 │   └── group_vars/all/
-│       ├── main.yml                  # default / tuning / versions / ค่าตาม EL major
-│       └── vault.yml.example         # template รหัสผ่าน
+│       ├── main.yml                  # defaults / tuning / versions / per-EL-major values
+│       └── vault.yml.example         # password template
 ├── playbooks/
-│   ├── detect_os.yml                 # อ่าน /etc/os-release, ตรวจ OS, เลือก Python ของระบบ (รันเสมอ)
-│   ├── preflight.yml                 # ตรวจค่าใน inventory + ความพร้อมของ node (read-only)
-│   ├── verify.yml                    # ตรวจสุขภาพ cluster (read-only)
+│   ├── detect_os.yml                 # read /etc/os-release, check the OS, select the system Python (always runs)
+│   ├── preflight.yml                 # validate the inventory + node readiness (read-only)
+│   ├── verify.yml                    # cluster health check (read-only)
 │   ├── switchover.yml                # planned switchover
-│   ├── enable-tls.yml                # เปิด TLS บน cluster เดิมแบบไม่เสีย quorum / ไม่ restart PostgreSQL
-│   └── tasks/etcd-peer-move.yml      # (ใช้โดย enable-tls.yml)
+│   ├── enable-tls.yml                # turn on TLS for an existing cluster without losing quorum / restarting PostgreSQL
+│   └── tasks/etcd-peer-move.yml      # (used by enable-tls.yml)
 ├── roles/
-│   ├── common/      # OS update, hostname, /etc/hosts, chrony, SELinux, firewalld (+ ลบ rule ค้าง)
-│   ├── postgresql/  # PGDG หรือ AppStream (EL8/9 module stream, EL10 postgresqlNN), ไม่ initdb
-│   ├── tls/         # CA บน control node, key/CSR บน node, เซ็น + ต่ออายุ cert, guard http↔https
+│   ├── common/      # OS update, hostname, /etc/hosts, chrony, SELinux, firewalld (+ stale rule cleanup)
+│   ├── postgresql/  # PGDG or AppStream (EL8/9 module stream, EL10 postgresqlNN), no initdb
+│   ├── tls/         # CA on the control node, key/CSR on the node, signing + renewal, http↔https guard
 │   ├── etcd/        # binary + checksum, config, systemd, upgrade guard
-│   ├── patroni/     # venv (python3.12 บน EL8/9), patroni.yml, ordered bootstrap, safe rolling restart
+│   ├── patroni/     # venv (python3.12 on EL8/9), patroni.yml, ordered bootstrap, safe rolling restart
 │   ├── haproxy/     # source build 3.4 LTS, write/read/stats
-│   └── keepalived/  # source build, VIP, unicast VRRP, track haproxy
+│   └── keepalived/  # source build, VIP, unicast VRRP, tracks haproxy
 ├── scripts/
-│   ├── setup-inventory.py            # ใส่ IP / subnet / VIP แบบถาม-ตอบ → inventory/hosts.yml
-│   └── git-hooks/pre-commit          # กัน commit vault.yml / pki/*.key ที่ยังไม่เข้ารหัส
+│   ├── setup-inventory.py            # enter IPs / subnet / VIP interactively → inventory/hosts.yml
+│   └── git-hooks/pre-commit          # blocks committing an unencrypted vault.yml / pki/*.key
 └── docs/
 ```
 
-## สิ่งที่ปรับจากบทความต้นฉบับ
+## Changes from the original article
 
-| เรื่อง | ต้นฉบับ (OL8) | project นี้ | เหตุผล |
+| Topic | Original (OL8) | This project | Why |
 |---|---|---|---|
-| OS | Oracle Linux 8 | Rocky Linux / RHEL 8, 9, 10 (ตรวจและปรับค่าตาม major version อัตโนมัติ) | |
-| PostgreSQL | PGDG EL-8, PG 16 | PG 18.6 — EL8/9: PGDG (ปิด module AppStream ให้), EL10: AppStream | AppStream ของ EL8/9 ไม่มี PG 18 ทุก minor |
-| PGDG บน EL10 | — | pin baseurl เป็น `rhel-10-$basearch` + `priority=1` | ไม่มี `$releasever_minor` → 404 และ AppStream มี `postgresql18` ชื่อซ้ำ |
-| Patroni | `pip3` ลง system Python | venv + pin version + psycopg3, Python ≥ 3.10 ตาม OS | ไม่ปน system Python, psycopg 3.3 ต้องใช้ 3.10+ |
-| Ansible Python | auto | Python ของระบบ (EL8 platform-python) ตั้งให้ทุก node | binding dnf/SELinux/firewalld มีเฉพาะ Python ของระบบ |
-| etcd | 3.5.17 | 3.7.2 + ตรวจ SHA256 + กันข้าม minor | |
-| Firewall / SELinux | ปิด firewalld, `setenforce 0` | firewalld เปิดเฉพาะ port + จำกัด source | ปลอดภัยกว่า |
-| Auth | `md5`, รหัสใน plaintext | `scram-sha-256`, Ansible Vault, `rewind_user` แยก | |
-| pg_hba | ใต้ `bootstrap` | ใต้ `postgresql` + reload ทันทีเมื่อเปลี่ยน | แก้ subnet แล้วมีผลโดยไม่ต้อง bootstrap ใหม่ |
-| HAProxy check | `OPTIONS /master` | `GET /primary` | `/master` deprecated |
-| keepalived | `killall -0`, `weight 2` | `vrrp_track_process`, `weight 0` | ต้นฉบับ VIP ไม่ย้ายเมื่อ haproxy ตาย (150 > 140+2) |
-| keepalived auth | `patroni_vip` (11 ตัว) | ตรวจ ≤ 8 ตัว | VRRP PASS ตัดส่วนเกินทิ้ง |
-| VRRP | multicast, `eth0` | unicast, ใช้ interface ที่มี IP ของ node | VM/cloud มัก block multicast; RHEL ใช้ `ens*` |
-| IP / VIP | ฝังใน config | ใส่เองผ่าน `scripts/setup-inventory.py` + ตรวจก่อน SSH | ไม่มีค่าของไซต์ใดฝังในโค้ด |
-| ตรวจก่อนติดตั้ง | — | `preflight.yml`: inventory, OS, repo, subnet, VIP ว่าง, internet | ดักปัญหาก่อนลงมือ |
-| การเข้ารหัส | ไม่มี (http / plaintext ทุกช่องทาง) | TLS ทุกช่องทางด้วย CA ของ cluster, etcd mutual TLS, `sslmode=verify-full` | กันดักฟังรหัสผ่าน/ข้อมูลใน network |
+| OS | Oracle Linux 8 | Rocky Linux / RHEL 8, 9, 10 (values adjusted per major version automatically) | |
+| PostgreSQL | PGDG EL-8, PG 16 | PG 18.6 — EL8/9: PGDG (AppStream module disabled), EL10: AppStream | EL8/9 AppStream lacks some PG 18 minors |
+| PGDG on EL10 | — | baseurl pinned to `rhel-10-$basearch` + `priority=1` | no `$releasever_minor` → 404, and AppStream ships a same-named `postgresql18` |
+| Patroni | `pip3` into the system Python | venv + pinned versions + psycopg3, Python ≥ 3.10 per OS | keeps the system Python clean; psycopg 3.3 needs 3.10+ |
+| Ansible Python | auto | system Python (EL8 platform-python) set for every node | dnf/SELinux/firewalld bindings exist only for the system Python |
+| etcd | 3.5.17 | 3.7.2 + SHA256 check + no minor skipping | |
+| Firewall / SELinux | firewalld off, `setenforce 0` | firewalld with only the needed ports + restricted sources | safer |
+| Auth | `md5`, plaintext passwords | `scram-sha-256`, Ansible Vault, separate `rewind_user` | |
+| pg_hba | under `bootstrap` | under `postgresql` + reloaded right away on change | subnet changes apply without a new bootstrap |
+| HAProxy check | `OPTIONS /master` | `GET /primary` | `/master` is deprecated |
+| keepalived | `killall -0`, `weight 2` | `vrrp_track_process`, `weight 0` | in the original the VIP never moved when haproxy died (150 > 140+2) |
+| keepalived auth | `patroni_vip` (11 chars) | checked ≤ 8 chars | VRRP PASS silently truncates the rest |
+| VRRP | multicast, `eth0` | unicast, the interface holding the node IP | VMs/clouds often block multicast; RHEL uses `ens*` |
+| IPs / VIP | hard-coded in configs | entered through `scripts/setup-inventory.py` + checked before SSH | no site values in the code |
+| Pre-install checks | — | `preflight.yml`: inventory, OS, repos, subnet, free VIP, internet | catches problems before changing anything |
+| Encryption | none (http / plaintext everywhere) | TLS on every channel with a cluster CA, etcd mutual TLS, `sslmode=verify-full` | protects passwords and data on the network |
 
 ## Git workflow
 
-### เอาขึ้น GitHub / GitLab
+### Publishing to GitHub / GitLab
 
 ```bash
-git remote add origin git@github.com:<org>/pg-ha-ansible.git     # หรือ git@gitlab.com:<group>/pg-ha-ansible.git
+git remote add origin git@github.com:<org>/pg-ha-ansible.git     # or git@gitlab.com:<group>/pg-ha-ansible.git
 git push -u origin main --tags
 ```
 
-- CI ตรวจ yamllint, ansible-lint, syntax-check ให้ทุก push: `.github/workflows/lint.yml` (GitHub) และ `.gitlab-ci.yml` (GitLab)
-- repo **ไม่มี** ค่าของไซต์หรือความลับ: `inventory/hosts.yml` เป็นแม่แบบ, ไม่มี `vault.yml` / `inventory/pki/`
-- repo private: commit `vault.yml` (เข้ารหัส) และ `inventory/pki/` ของไซต์ได้ — pre-commit hook กันไฟล์ที่ไม่ได้เข้ารหัส
-- repo public: เปิดบรรทัดท้าย `.gitignore` เพื่อไม่ให้ vault และ CA ของไซต์ขึ้นไป แล้วเก็บไว้ที่อื่น (หรือแยก repo private สำหรับ inventory)
+- CI runs yamllint, ansible-lint and syntax-check on every push: `.github/workflows/lint.yml` (GitHub) and `.gitlab-ci.yml` (GitLab)
+- The repository contains **no** site values or secrets: `inventory/hosts.yml` is a template, and there is no `vault.yml` / `inventory/pki/`
+- Private repository: you can commit the site's `vault.yml` (encrypted) and `inventory/pki/` — the pre-commit hook blocks unencrypted files
+- Public repository: uncomment the last lines of `.gitignore` so the site's vault and CA are never pushed, and keep them elsewhere (or in a separate private inventory repository)
 
-### ทั่วไป
+### General
 
-- `vault.yml` commit ได้เฉพาะตอนเข้ารหัสแล้ว — เปิด hook ด้วย `git config core.hooksPath scripts/git-hooks`
-- ก่อน push: `ansible-lint && ansible-playbook site.yml --syntax-check`
-- ก่อนแก้ cluster ที่รันอยู่: `ansible-playbook site.yml --ask-vault-pass --check --diff`
-- หลาย environment: copy ทั้งโฟลเดอร์ `inventory/` เป็น `inventories/uat/` (group_vars ต้องอยู่ข้าง hosts.yml)
-  แล้ว `python3 scripts/setup-inventory.py -o inventories/uat/hosts.yml` และรันด้วย `-i inventories/uat/hosts.yml`
+- `vault.yml` may only be committed encrypted — enable the hook with `git config core.hooksPath scripts/git-hooks`
+- Before pushing: `ansible-lint && ansible-playbook site.yml --syntax-check`
+- Before changing a running cluster: `ansible-playbook site.yml --ask-vault-pass --check --diff`
+- Several environments: copy the whole `inventory/` folder to `inventories/uat/` (group_vars must sit next to hosts.yml),
+  then `python3 scripts/setup-inventory.py -o inventories/uat/hosts.yml` and run with `-i inventories/uat/hosts.yml`

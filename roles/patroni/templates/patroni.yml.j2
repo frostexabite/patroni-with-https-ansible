@@ -1,7 +1,7 @@
 # {{ ansible_managed }}
-{# patroni_tls_stage (ใช้ใน playbooks/enable-tls.yml):
-      pg_ssl = เปิด ssl ใน PostgreSQL อย่างเดียวก่อน (REST API / etcd / sslmode ภายในยังเหมือนเดิม)
-      final  = ค่าปกติตาม tls_enabled #}
+{# patroni_tls_stage (used by playbooks/enable-tls.yml):
+      pg_ssl = turn on ssl in PostgreSQL only (REST API / etcd / internal sslmode unchanged)
+      final  = normal values per tls_enabled #}
 {% set tls_pg = tls_enabled | bool %}
 {% set tls_all = tls_enabled | bool and (patroni_tls_stage | default('final')) == 'final' %}
 scope: {{ cluster_scope }}
@@ -18,7 +18,7 @@ restapi:
     username: {{ patroni_restapi_username }}
     password: {{ patroni_restapi_password | to_json }}
 {% if tls_all %}
-  # https — HAProxy ตรวจด้วย check-ssl + ca-file; Patroni โหลด cert ใหม่เองตอน reload
+  # https — HAProxy checks with check-ssl + ca-file; Patroni reloads the certificate on reload
   certfile: {{ tls_node_cert }}
   keyfile: {{ tls_postgres_key }}
 
@@ -92,7 +92,7 @@ postgresql:
     - {{ h }}  all          all          {{ cidr }}  scram-sha-256
 {% endfor %}
 {% if tls_all and tls_postgres_enforce | bool %}
-    # บังคับ SSL: connection TCP ที่ไม่เข้ารหัสถูกปฏิเสธทั้งหมด
+    # SSL required: every unencrypted TCP connection is rejected
     - hostnossl  all  all  0.0.0.0/0  reject
     - hostnossl  all  all  ::/0       reject
 {% endif %}

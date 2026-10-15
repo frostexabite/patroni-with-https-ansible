@@ -1,14 +1,14 @@
 ---
 # =====================================================================
-#  Detect target OS (Rocky Linux / RHEL 8, 9, 10) แล้วเลือก Python ของระบบให้ Ansible
+#  Detect the target OS (Rocky Linux / RHEL 8, 9, 10) and select the system Python for Ansible
 #
-#  ทำไมต้องมี: EL8/EL9 จะมี python3.12 ติดตั้งเพิ่ม (สำหรับ Patroni) และ Ansible
-#  auto-discovery จะเลือก python3.12 ก่อน — แต่ binding ของ dnf / SELinux / firewalld
-#  มีเฉพาะ Python ของระบบ (EL8 = /usr/libexec/platform-python, EL9/10 = /usr/bin/python3)
-#  จึงต้องกำหนด ansible_python_interpreter ให้ชัดเจน
+#  Why: EL8/EL9 get python3.12 installed (for Patroni) and Ansible
+#  auto-discovery would pick python3.12 first — but the dnf / SELinux / firewalld bindings
+#  exist only for the system Python (EL8 = /usr/libexec/platform-python, EL9/10 = /usr/bin/python3)
+#  so ansible_python_interpreter must be set explicitly
 #
-#  ใช้ raw (ไม่ต้องมี Python) และ tag "always" → รันเสมอแม้ --tags haproxy หรือ --skip-tags preflight
-#  ถ้าต้องการกำหนด interpreter เอง: ใส่ ansible_python_interpreter ใน inventory/hosts.yml
+#  Uses raw (no Python needed) and tag "always" → runs even with --tags haproxy or --skip-tags preflight
+#  To choose the interpreter yourself: set ansible_python_interpreter in inventory/hosts.yml
 # =====================================================================
 - name: Detect target OS and select the system Python
   hosts: pg_cluster
@@ -57,7 +57,7 @@
       run_once: true
       when: not allow_mixed_os_versions | bool
 
-    # ansible-core 2.17+ จัดการ Python 3.6 ไม่ได้ และ dnf binding ของ EL8 มีเฉพาะ Python 3.6
+    # ansible-core 2.17+ cannot manage Python 3.6, and EL8's dnf bindings exist only for Python 3.6
     - name: EL8 nodes need ansible-core 2.16 on the control node
       ansible.builtin.assert:
         that: os_detected_major != '8' or ansible_version.full is version('2.17', '<')

@@ -1,7 +1,7 @@
 ---
-# CA ของ cluster อยู่บน control node: <inventory>/pki/{ca.key, ca.csr, ca.crt}
-#   ca.key เข้ารหัสด้วย tls_ca_passphrase (vault_tls_ca_passphrase) → commit เข้า Git ได้เหมือน vault.yml
-#   ถ้าหาย ต้องออก cert ใหม่ทั้ง cluster + แจก ca.crt ใหม่ให้ app — จึงไม่ยอมสร้าง CA ใหม่เองถ้า node มี CA อยู่แล้ว
+# The cluster CA lives on the control node: <inventory>/pki/{ca.key, ca.csr, ca.crt}
+#   ca.key is encrypted with tls_ca_passphrase (vault_tls_ca_passphrase) → can be committed to Git like vault.yml
+#   if it is lost every certificate must be re-issued and apps need a new ca.crt — so no new CA is created while nodes trust one
 - name: Read the CA certificate the node already trusts
   ansible.builtin.slurp:
     src: "{{ tls_ca_cert }}"
@@ -15,8 +15,8 @@
   become: false
   vars:
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
-    # inventory ตั้ง ansible_become: true ให้ทุก host — ตัวแปรชนะ keyword become: false จึงต้องปิดด้วยตัวแปร
-    # (control node ไม่ต้องใช้ sudo และ user ที่รัน Ansible อาจ sudo ไม่ได้แบบไม่ถามรหัส)
+    # The inventory sets ansible_become: true for every host — a variable beats the become: false keyword, so disable it with a variable
+    # (the control node needs no sudo, and the user running Ansible may not have passwordless sudo)
     ansible_become: false
     tls_nodes_with_ca: >-
       {{ ansible_play_hosts | map('extract', hostvars, 'tls_node_ca')

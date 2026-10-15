@@ -3,9 +3,9 @@ global_defs {
     router_id {{ inventory_hostname }}
 }
 
-# ตรวจว่า process haproxy ยังรันอยู่ (ไม่ต้องใช้ script/killall)
-# weight 0 = ถ้า haproxy ตาย instance จะเข้าสถานะ FAULT และปล่อย VIP ทันที
-# (ต้นฉบับใช้ weight 2 ซึ่ง VIP จะไม่ย้าย เพราะ 150 ยังมากกว่า 140+2)
+# Check that the haproxy process is still running (no script/killall needed)
+# weight 0 = if haproxy dies the instance goes to FAULT and releases the VIP immediately
+# (the original guide used weight 2, so the VIP never moved because 150 is still above 140+2)
 vrrp_track_process track_haproxy {
     process haproxy
     weight 0

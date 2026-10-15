@@ -26,7 +26,7 @@
     - { path: /etc/etcd, mode: "0750" }
     - { path: "{{ etcd_data_dir }}", mode: "0700" }
 
-# etcd อ่าน key ได้เฉพาะไฟล์ที่ตัวเองเป็นเจ้าของ → สำเนาจาก node.key (role tls)
+# etcd only reads a key file it owns → copy of node.key (role tls)
 - name: Copy the node key for etcd (owner etcd, 0600)
   ansible.builtin.copy:
     src: "{{ tls_node_key }}"
@@ -46,7 +46,7 @@
   failed_when: false
   check_mode: false
 
-# etcd อัปเกรดได้ทีละ minor (เช่น 3.6.x → 3.7.x ต้องมาจาก >= 3.6.11)
+# etcd upgrades one minor at a time (e.g. 3.6.x → 3.7.x must come from >= 3.6.11)
 - name: Guard etcd upgrade path (one minor version at a time)
   vars:
     etcd_current: "{{ etcd_installed.stdout | default('') | regex_search('etcd Version: ([0-9.]+)', '\\1') | default([''], true) | first }}"
@@ -110,10 +110,10 @@
     dest: /etc/profile.d/etcd.sh
     mode: "0644"
     content: |
-      # Ansible managed (roles/etcd) — แก้ที่ project แทนการแก้ไฟล์นี้
+      # Ansible managed (roles/etcd) — change the project instead of this file
       export ETCDCTL_ENDPOINTS={{ etcd_endpoints }}
       {% if etcd_client_scheme == 'https' %}
-      # client cert ของ node อ่านได้เฉพาะ root → ใช้ ectl (sudo) หรือรันในฐานะ root
+      # the node client certificate is readable by root only → use ectl (sudo) or run as root
       export ETCDCTL_CACERT={{ tls_ca_cert }}
       export ETCDCTL_CERT={{ tls_node_cert }}
       export ETCDCTL_KEY={{ tls_node_key }}
@@ -128,7 +128,7 @@
     mode: "0644"
   notify: Restart etcd
 
-# start พร้อมกันทุก node (no_block) เพราะ etcd ต้องการ quorum ก่อนจะส่ง READY ให้ systemd
+# start every node at once (no_block) because etcd needs quorum before it sends READY to systemd
 - name: Start etcd on all members simultaneously
   ansible.builtin.systemd_service:
     name: etcd

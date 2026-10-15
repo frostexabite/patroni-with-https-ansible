@@ -1,7 +1,7 @@
 ---
-# Planned switchover (สำหรับงาน maintenance)
-#   ansible-playbook playbooks/switchover.yml --ask-vault-pass                     # ให้ Patroni เลือก candidate เอง
-#   ansible-playbook playbooks/switchover.yml -e switchover_candidate=pg-node-2      # ระบุ node ใหม่ (ชื่อตาม inventory)
+# Planned switchover (for maintenance work)
+#   ansible-playbook playbooks/switchover.yml --ask-vault-pass                     # let Patroni pick the candidate
+#   ansible-playbook playbooks/switchover.yml -e switchover_candidate=pg-node-2      # choose the new leader (inventory name)
 - name: Patroni planned switchover
   hosts: pg_cluster[0]
   gather_facts: false

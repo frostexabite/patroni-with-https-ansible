@@ -1,12 +1,12 @@
 ---
-# ใช้ PostgreSQL จาก AppStream ของ OS — ถอด PGDG repo ออก (ถ้ามี)
-# เพื่อไม่ให้ dnf สลับไปใช้แพ็กเกจ PGDG ตอนอัปเดต
+# Use PostgreSQL from the OS AppStream — remove the PGDG repo (if present)
+# so dnf does not switch to PGDG packages on update
 - name: Remove PGDG repository package if present
   ansible.builtin.dnf:
     name: pgdg-redhat-repo
     state: absent
 
-# EL8/EL9: PostgreSQL อยู่ใน module stream (postgresql:13, :15, :16, ...) ต้อง enable stream ที่ต้องการก่อน
+# EL8/EL9: PostgreSQL ships as module streams (postgresql:13, :15, :16, ...) — enable the wanted stream first
 - name: Enable the AppStream module stream (EL8/EL9) for PostgreSQL {{ pg_version }}
   when: el_major | int < 10
   block:
@@ -24,7 +24,7 @@
           Use pg_install_source: pgdg (or auto), or a pg_version listed by `dnf module list postgresql`.
         quiet: true
 
-    # [e] = enabled ; ถ้าเคยใช้โหมด pgdg (module ถูก disable) หรือ enable stream อื่นไว้ ต้อง reset ก่อน
+    # [e] = enabled ; coming from pgdg mode (module disabled) or another enabled stream needs a reset first
     - name: Reset the postgresql module (switching from another stream or from pgdg mode)
       ansible.builtin.command: dnf -qy module reset postgresql
       when: "postgresql_modules.stdout is not search('(?m)^postgresql\\s+' ~ pg_version ~ '\\s+(\\[[a-z]\\])*\\[e\\]')"

@@ -1,79 +1,83 @@
 # Changelog
 
+## v2.2.0 — English
+- All documentation, code comments, playbook messages and `scripts/setup-inventory.py` prompts are now in English
+  (no functional change; `setup-inventory.py` accepts `y/yes` and `n/no`)
+
 ## v2.1.3
-- เพิ่ม CI สำหรับ GitHub Actions และ GitLab CI (yamllint, ansible-lint, syntax-check), `.gitattributes` (LF)
-- แก้: `verify.yml` รายงาน `Not running on <node>: etcd, patroni, haproxy, keepalived` ทั้งที่ทุก service รันอยู่
-- สาเหตุ (ansible-core 2.19+): regex ที่มี `\\` ใน YAML แบบ plain / `>-` ถูกส่งถึง Jinja เป็น backslash 2 ตัว → regex ไม่ match
-  แก้ทุกจุดที่เป็นแบบนี้: verify (ชื่อ service), ปิด module `postgresql` ของ AppStream (EL8/9 + PGDG — เดิมไม่ได้ปิด),
-  ตรวจ/เปิด module stream (EL8/9 + AppStream), preflight, และ `enable-tls.yml` ขั้น 4a (เดิมจะรันซ้ำแม้ทำเสร็จแล้ว)
+- Added CI for GitHub Actions and GitLab CI (yamllint, ansible-lint, syntax-check), `.gitattributes` (LF)
+- Fixed: `verify.yml` reported `Not running on <node>: etcd, patroni, haproxy, keepalived` while every service was running
+- Cause (ansible-core 2.19+): regexes with `\\` inside plain / `>-` YAML reach Jinja as two backslashes → the regex never matches.
+  Fixed everywhere this pattern occurred: verify (service names), disabling the AppStream `postgresql` module (EL8/9 + PGDG — previously not disabled),
+  module stream checks/enablement (EL8/9 + AppStream), preflight, and `enable-tls.yml` step 4a (previously re-ran even when already done)
 
 ## v2.1.2
-- แก้: `'ansible_managed' is undefined` ที่ task "Shell helper ..." ของ etcd / Patroni และไฟล์ .dcs-connection —
-  ansible-core 2.19 ขึ้นไปมีตัวแปร `ansible_managed` เฉพาะใน module `template` ใช้ใน `copy content:` ไม่ได้
-  (บั๊กนี้มีตั้งแต่ v2.0.0 แต่จะเจอเมื่อใช้ ansible-core รุ่นใหม่) → เปลี่ยนเป็นข้อความคงที่
+- Fixed: `'ansible_managed' is undefined` in the etcd / Patroni "Shell helper ..." tasks and the .dcs-connection file —
+  since ansible-core 2.19 `ansible_managed` exists only in the `template` module, not in `copy content:`
+  (the bug dates back to v2.0.0 but only shows with newer ansible-core) → replaced with fixed text
 
 ## v2.1.1
-- แก้: preflight และการเซ็น cert บน control node พยายาม `sudo` บนเครื่องที่รัน Ansible
-  (`sudo: a password is required` เมื่อ user ที่รัน Ansible ไม่มี sudo แบบไม่ถามรหัส) — สาเหตุคือ inventory ตั้ง
-  `ansible_become: true` ให้ทุก host ซึ่งชนะ keyword `become: false` จึงปิดด้วยตัวแปร `ansible_become: false` แทน
+- Fixed: preflight and certificate signing on the control node tried to `sudo` on the machine running Ansible
+  (`sudo: a password is required` when that user has no passwordless sudo) — the inventory sets
+  `ansible_become: true` for every host, which beats the `become: false` keyword, so it is now disabled with the variable `ansible_become: false`
 
-## v2.1.0 — TLS ทุกช่องทางด้วย CA ของ cluster เอง
+## v2.1.0 — TLS on every channel with a cluster-owned CA
 
-### TLS (`tls_enabled: true` เป็นค่าเริ่มต้น) — รายละเอียด `docs/TLS.md`
-- role ใหม่ `tls`: สร้าง CA บน control node (`inventory/pki/`, `ca.key` เข้ารหัสด้วย `vault_tls_ca_passphrase`),
-  private key ของ node สร้างบน node เอง (ไม่ออกจากเครื่อง) → CSR → control node เซ็น (`community.crypto`)
-  - SAN = ชื่อ/IP ทุก node + VIP + `tls_extra_sans` → app ใช้ `sslmode=verify-full` ผ่าน VIP ได้
-  - ต่ออายุอัตโนมัติเมื่อเหลือน้อยกว่า `tls_cert_renew_days` และออกใหม่เมื่อ SAN/CA เปลี่ยน — reload ไม่ restart
-  - ไม่ยอมสร้าง CA ใหม่เองถ้า node เชื่อ CA เดิมอยู่ (กันรันจาก control node ที่ไม่มี pki/)
-  - guard: `site.yml` หยุดถ้า cluster ที่รันอยู่ใช้ http แต่ `tls_enabled: true` (หรือกลับกัน)
-- PostgreSQL: `ssl=on`, `ssl_min_protocol_version` TLSv1.2; Patroni ต่อ replication / pg_rewind / superuser ด้วย
-  `sslmode=verify-full`; `tls_postgres_enforce: true` = pg_hba `hostssl` + ปฏิเสธ connection ที่ไม่เข้ารหัส
-- Patroni REST API https (`ctl.cacert` ให้ patronictl); HAProxy health check `check-ssl verify required`
-- etcd: client + peer https พร้อม client certificate (mutual TLS); alias `ectl` บน node
-- Patroni restart แบบ maintenance mode อัตโนมัติเมื่อการเชื่อมต่อ etcd เปลี่ยน (reload ไม่พอ)
-- หน้า HAProxy stats เป็น https
-- `playbooks/enable-tls.yml` (ใหม่): เปิด TLS บน cluster ที่ deploy แล้ว — etcd peer ย้ายผ่าน port ชั่วคราว 2381
-  ทีละ member (quorum อยู่ตลอด), PostgreSQL `ssl=on` ด้วย reload ก่อน แล้วจึงสลับ Patroni + HAProxy, ไม่ restart PostgreSQL
-  (ทดสอบ: INSERT ผ่าน VIP ทุก 0.3 วินาทีตลอดการย้าย สำเร็จ 308/308)
-- `verify.yml`: ต่อผ่าน VIP ด้วย `sslmode=verify-full`, ตรวจว่า connection และ replication เข้ารหัสจริง
-- preflight: ตรวจ `vault_tls_ca_passphrase` และ python `cryptography` / `community.crypto` บน control node
-- pre-commit hook: กัน commit `pki/*.key` ที่ไม่ได้เข้ารหัส
+### TLS (`tls_enabled: true` by default) — details in `docs/TLS.md`
+- New `tls` role: creates the CA on the control node (`inventory/pki/`, `ca.key` encrypted with `vault_tls_ca_passphrase`);
+  node private keys are created on the nodes (never leave them) → CSR → signed by the control node (`community.crypto`)
+  - SAN = every node name/IP + VIP + `tls_extra_sans` → applications can use `sslmode=verify-full` through the VIP
+  - automatic renewal when fewer than `tls_cert_renew_days` remain, re-issue when the SAN/CA changes — reload, no restart
+  - refuses to create a new CA while the nodes trust the old one (protects against running from a control node without pki/)
+  - guard: `site.yml` stops if a running cluster uses http while `tls_enabled: true` (or the other way round)
+- PostgreSQL: `ssl=on`, `ssl_min_protocol_version` TLSv1.2; Patroni connects for replication / pg_rewind / superuser with
+  `sslmode=verify-full`; `tls_postgres_enforce: true` = pg_hba `hostssl` + reject unencrypted connections
+- Patroni REST API over https (`ctl.cacert` for patronictl); HAProxy health checks `check-ssl verify required`
+- etcd: client + peer https with client certificates (mutual TLS); `ectl` alias on the nodes
+- Automatic Patroni restart in maintenance mode when the etcd connection settings change (a reload is not enough)
+- HAProxy stats page over https
+- `playbooks/enable-tls.yml` (new): turns on TLS for a deployed cluster — etcd peers move through the temporary port 2381
+  one member at a time (quorum kept throughout), PostgreSQL `ssl=on` through a reload first, then Patroni + HAProxy switch, PostgreSQL is not restarted
+  (test: an INSERT through the VIP every 0.3 seconds during the whole migration, 308/308 succeeded)
+- `verify.yml`: connects through the VIP with `sslmode=verify-full`, checks that connections and replication are really encrypted
+- preflight: checks `vault_tls_ca_passphrase` and python `cryptography` / `community.crypto` on the control node
+- pre-commit hook: blocks committing unencrypted `pki/*.key`
 
-### แก้ไข
-- HAProxy: รหัสหน้า stats ที่มี `#` ถูกตัดทิ้ง (HAProxy ถือว่าเป็น comment) → quote ให้แล้ว
-- HAProxy: บันทึกสถานะ server ก่อน reload (`server-state-file` + socat) — เดิมหลัง reload ทุก server ถูกถือว่า UP
-  ชั่วขณะ ทำให้ write บางส่วนไปตก replica (`cannot execute INSERT in a read-only transaction`) จนกว่า health check จะรอบแรกเสร็จ
+### Fixes
+- HAProxy: a stats password containing `#` was truncated (HAProxy treats it as a comment) → now quoted
+- HAProxy: server state is saved before each reload (`server-state-file` + socat) — previously every server was considered UP
+  for a moment after a reload, so some writes landed on replicas (`cannot execute INSERT in a read-only transaction`) until the first health check finished
 
-## v2.0.0 — Rocky Linux / RHEL 8, 9, 10 + IP ที่ใส่เอง
+## v2.0.0 — Rocky Linux / RHEL 8, 9, 10 + user-entered IPs
 
 ### OS
-- รองรับ Rocky Linux และ RHEL 8, 9, 10 (AlmaLinux / Oracle Linux ใช้ได้ด้วย) แทน Oracle Linux 10 อย่างเดียว
-- `playbooks/detect_os.yml` (ใหม่, รันเสมอ): อ่าน `/etc/os-release` ด้วย `raw`, ตรวจ OS ที่รองรับ,
-  บังคับให้ทุก node เป็น major เดียวกัน, ตรวจว่า EL8 ใช้ ansible-core 2.16 และตั้ง `ansible_python_interpreter`
-  เป็น Python ของระบบ (EL8 `/usr/libexec/platform-python`, EL9/10 `/usr/bin/python3`)
-- Patroni venv ใช้ Python ตาม major version (`patroni_python_by_major`): EL8/9 = `python3.12`, EL10 = `python3`
-  เพราะ psycopg 3.3 ต้องใช้ Python ≥ 3.10 + ตรวจเวอร์ชันและป้องกัน venv ที่สร้างด้วย Python คนละตัว
-- PostgreSQL `pg_install_source: auto` (ค่าเริ่มต้นใหม่): EL8/9 → PGDG, EL10 → AppStream
-  - PGDG: ปิด module `postgresql` ของ AppStream บน EL8/9, `priority=1` แทน `excludepkgs` บน repo ของ OS
-    (repo id ต่างกันทุก distro และ RHEL ถูก subscription-manager เขียนทับ), pin baseurl เฉพาะ EL10, GPG key ตาม arch
-  - AppStream: EL8/9 enable module stream `postgresql:<ver>`, EL10 ใช้แพ็กเกจ `postgresql<ver>`
-  - error ที่บอกวิธีแก้เมื่อแพ็กเกจไม่มีใน repo
-- base packages ไม่ผูกกับ Oracle Linux (setuptools ของ Python ระบบตาม major, เพิ่ม `iputils`)
-- keepalived build เพิ่ม `pkgconf-pkg-config`, HAProxy แบบ package ตรวจว่าเป็น EL9+ (EL8 มี 1.8)
-- etcd รองรับ ppc64le / s390x เพิ่ม
+- Supports Rocky Linux and RHEL 8, 9, 10 (AlmaLinux / Oracle Linux work too) instead of Oracle Linux 10 only
+- `playbooks/detect_os.yml` (new, always runs): reads `/etc/os-release` with `raw`, checks the OS is supported,
+  requires the same major on every node, checks that EL8 uses ansible-core 2.16, and sets `ansible_python_interpreter`
+  to the system Python (EL8 `/usr/libexec/platform-python`, EL9/10 `/usr/bin/python3`)
+- The Patroni venv uses a Python per major version (`patroni_python_by_major`): EL8/9 = `python3.12`, EL10 = `python3`,
+  because psycopg 3.3 needs Python ≥ 3.10 + version check and protection against a venv built with another Python
+- PostgreSQL `pg_install_source: auto` (new default): EL8/9 → PGDG, EL10 → AppStream
+  - PGDG: disables the AppStream `postgresql` module on EL8/9, `priority=1` instead of `excludepkgs` on the OS repos
+    (repo ids differ per distro and subscription-manager overwrites them on RHEL), baseurl pinned on EL10 only, GPG key per arch
+  - AppStream: EL8/9 enable the `postgresql:<ver>` module stream, EL10 uses the `postgresql<ver>` packages
+  - errors that explain the fix when a package is missing from the repos
+- Base packages no longer tied to Oracle Linux (system Python setuptools per major, `iputils` added)
+- keepalived build adds `pkgconf-pkg-config`; package-based HAProxy checks for EL9+ (EL8 ships 1.8)
+- etcd supports ppc64le / s390x as well
 - `ansible.cfg`: `interpreter_python = auto_silent`
 
-### IP / VIP ใส่เอง
-- `inventory/hosts.yml` เป็นแม่แบบ (`<IP-node-1>`, `<CIDR-cluster>`, `<VIP>`) ไม่มี IP ของไซต์ใดฝังอยู่
-- `scripts/setup-inventory.py` (ใหม่): ถาม-ตอบหรือ argument (`--ips`, `--nodes`, `--vip`, ...) ตรวจค่าแล้วเขียน `hosts.yml`
-  พร้อมสำรองไฟล์เดิม — ใช้ค่าเดิมเป็น default เมื่อรันซ้ำ, ใช้แค่ standard library (Python 3.6+)
-- preflight มี play แรกที่ตรวจค่าใน inventory บน control node ก่อน SSH: placeholder ที่เหลือ, IPv4, IP ซ้ำ,
-  อยู่ใน subnet, VIP ไม่ชน node, network/broadcast, prefix, virtual_router_id, ชื่อ host
-- `keepalived_enabled`, `keepalived_router_id`, `keepalived_interface` ย้ายไปเป็นค่าของไซต์ใน `hosts.yml`
-  (ไม่ประกาศใน `group_vars/all` แล้ว เพื่อให้ override ได้จริง)
-- interface ของ VIP เลือกจาก interface ที่มี IP ของ node (เดิมใช้ interface ของ default route)
-- preflight ตรวจว่า interface ของ VIP มีอยู่จริง และ repo ของ OS มีแพ็กเกจที่ต้องใช้
-- ชื่อ node default เป็น `pg-node-N`, เอกสารใช้ตัวแปร shell (`$NODE1_IP`, `$VIP`) แทน IP ตายตัว
+### User-entered IPs / VIP
+- `inventory/hosts.yml` is a template (`<IP-node-1>`, `<CIDR-cluster>`, `<VIP>`) without any site's IPs
+- `scripts/setup-inventory.py` (new): interactive or arguments (`--ips`, `--nodes`, `--vip`, ...), validates the values and writes `hosts.yml`,
+  backing up the old file — reuses current values as defaults on re-runs, standard library only (Python 3.6+)
+- preflight's first play validates the inventory on the control node before SSH: leftover placeholders, IPv4, duplicate IPs,
+  subnet membership, VIP vs. node clash, network/broadcast, prefix, virtual_router_id, host names
+- `keepalived_enabled`, `keepalived_router_id`, `keepalived_interface` moved to site values in `hosts.yml`
+  (no longer declared in `group_vars/all`, so overrides actually work)
+- The VIP interface is the one holding the node IP (previously the default route interface)
+- preflight checks that the VIP interface exists and that the OS repos provide the required packages
+- Default node names are `pg-node-N`; docs use shell variables (`$NODE1_IP`, `$VIP`) instead of fixed IPs
 
 ## v1.0.0
-- Oracle Linux 10, PostgreSQL 18 (AppStream/PGDG), etcd 3.7, Patroni 4.1, HAProxy 3.4 / keepalived 2.4 จาก source
+- Oracle Linux 10, PostgreSQL 18 (AppStream/PGDG), etcd 3.7, Patroni 4.1, HAProxy 3.4 / keepalived 2.4 from source

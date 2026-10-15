@@ -1,3 +1,3 @@
 ---
-# node แรกได้ 150, ถัดไป 140, 130 ... (override ใน inventory ได้)
+# first node gets 150, then 140, 130 ... (can be overridden in the inventory)
 keepalived_priority: "{{ 150 - (groups['pg_cluster'].index(inventory_hostname) * 10) }}"

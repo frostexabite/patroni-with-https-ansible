@@ -1,6 +1,6 @@
 ---
-# ใช้โดย playbooks/enable-tls.yml: ย้าย peer URL ของทุก member ไปที่ https://<ip>:<etl_target_port>
-# ทุก node ฟัง port ปลายทางอยู่แล้ว (dual1/dual2) จึงย้ายทีละ member ได้โดย quorum ไม่หาย
+# Used by playbooks/enable-tls.yml: move every member's peer URL to https://<ip>:<etl_target_port>
+# Every node already listens on the target port (dual1/dual2), so members move one by one without losing quorum
 - name: Read etcd membership
   ansible.builtin.command:
     argv: "{{ etl_etcdctl + ['member', 'list', '-w', 'json'] }}"

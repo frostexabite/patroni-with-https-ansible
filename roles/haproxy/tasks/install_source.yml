@@ -1,5 +1,5 @@
 ---
-# Build HAProxy (latest LTS) จาก source ของ haproxy.org — ตรวจ SHA256 ก่อน build
+# Build HAProxy (latest LTS) from the haproxy.org source — SHA256 verified before building
 - name: Remove distro HAProxy package (avoid two binaries/units)
   ansible.builtin.dnf:
     name: haproxy

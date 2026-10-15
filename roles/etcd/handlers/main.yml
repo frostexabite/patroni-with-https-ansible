@@ -1,5 +1,5 @@
 ---
-# restart ทีละ node เพื่อไม่ให้เสีย quorum
+# restart one node at a time so quorum is kept
 - name: Restart etcd
   ansible.builtin.systemd_service:
     name: etcd

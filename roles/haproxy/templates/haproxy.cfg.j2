@@ -1,10 +1,10 @@
 # {{ ansible_managed }}
-# HAProxy ใช้ Patroni REST API (port {{ patroni_restapi_port }}) ตรวจว่า node ไหนเป็น primary/replica
-#   /primary -> 200 เฉพาะ leader      (แทน /master ที่ deprecated แล้ว)
-#   /replica -> 200 เฉพาะ replica ที่ streaming อยู่
+# HAProxy uses the Patroni REST API (port {{ patroni_restapi_port }}) to find the primary/replicas
+#   /primary -> 200 only on the leader      (replaces the deprecated /master)
+#   /replica -> 200 only on a streaming replica
 {% if tls_enabled | bool %}
-# TLS: health check ต่อ Patroni แบบ https (check-ssl) และตรวจ cert ด้วย CA ของ cluster
-#      port 5000/5001 เป็น TCP passthrough — TLS ของ app ไปจบที่ PostgreSQL เอง (cert ของ node)
+# TLS: health checks reach Patroni over https (check-ssl) and verify its certificate with the cluster CA
+#      ports 5000/5001 are TCP passthrough — application TLS terminates at PostgreSQL itself (node certificate)
 {% endif %}
 {% set chk = ' check-ssl verify required ca-file ' ~ tls_ca_cert if tls_enabled | bool else '' %}
 global
@@ -13,8 +13,8 @@ global
     user haproxy
     group haproxy
     stats socket /var/lib/haproxy/stats mode 660 level admin
-    # handler "Reload haproxy" บันทึกสถานะ UP/DOWN ไว้ก่อน reload → process ใหม่ไม่ส่ง write ไป replica
-    # ระหว่างรอ health check รอบแรก (ค่าเริ่มต้นของ HAProxy ถือว่าทุก server UP)
+    # the "Reload haproxy" handler saves UP/DOWN state before reloading → the new process does not send writes
+    # to replicas while waiting for the first health check (HAProxy otherwise assumes every server is UP)
     server-state-file /var/lib/haproxy/server-state
 {% if tls_enabled | bool %}
     ssl-default-bind-options ssl-min-ver {{ tls_min_protocol }}
@@ -38,7 +38,7 @@ listen stats
     stats enable
     stats uri /
     stats refresh 10s
-    # quote ไว้: ถ้าไม่ quote ตัว # ในรหัสผ่านจะกลายเป็น comment (รหัสถูกตัดเหลือแค่ส่วนหน้า #)
+    # quoted: unquoted, a # in the password starts a comment (the password would be cut at the #)
     stats auth '{{ (haproxy_stats_user ~ ':' ~ haproxy_stats_password) | replace("'", "'\\''") }}'
 
 listen postgres_write

@@ -1,13 +1,13 @@
 ---
 # =====================================================================
-#  Pre-flight checks — อ่านอย่างเดียว ไม่แก้ไขอะไรบนเครื่อง
-#  site.yml เรียกให้อัตโนมัติก่อนติดตั้ง หรือรันเดี่ยว ๆ ได้:
+#  Pre-flight checks — read-only, nothing is changed on the hosts
+#  site.yml runs it automatically before installing, or run it on its own:
 #    ansible-playbook playbooks/preflight.yml --ask-vault-pass
-#  ข้ามได้ด้วย: --skip-tags preflight (ยกเว้น detect OS ซึ่งรันเสมอ)
+#  Skip with: --skip-tags preflight (except detect OS, which always runs)
 #
-#  1) ตรวจค่าที่ใส่ใน inventory/hosts.yml บน control node (ยังไม่ SSH)
-#  2) detect OS + เลือก Python ของระบบ (playbooks/detect_os.yml)
-#  3) ตรวจบนแต่ละ node: IP, repo, VIP, internet, เวลา
+#  1) validate the values in inventory/hosts.yml on the control node (no SSH yet)
+#  2) detect OS + select the system Python (playbooks/detect_os.yml)
+#  3) checks on each node: IP, repos, VIP, internet, time
 # =====================================================================
 - name: Validate site settings in inventory/hosts.yml (control node, no SSH)
   hosts: localhost
@@ -18,8 +18,8 @@
   check_mode: false
   tags: [preflight, always]
   vars:
-    # inventory ตั้ง ansible_become: true ให้ทุก host — ตัวแปรชนะ keyword become: false จึงต้องปิดด้วยตัวแปร
-    # (control node ไม่ต้องใช้ sudo และ user ที่รัน Ansible อาจ sudo ไม่ได้แบบไม่ถามรหัส)
+    # The inventory sets ansible_become: true for every host — a variable beats the become: false keyword, so disable it with a variable
+    # (the control node needs no sudo, and the user running Ansible may not have passwordless sudo)
     ansible_become: false
     pf_hosts: "{{ groups['pg_cluster'] | default([]) }}"
     pf_first: "{{ pf_hosts[0] | default('') }}"
@@ -183,7 +183,7 @@
   hosts: pg_cluster
   gather_facts: true
   any_errors_fatal: true
-  check_mode: false            # ทุก task ในนี้อ่านอย่างเดียว จึงรันจริงได้แม้อยู่ใน --check
+  check_mode: false            # every task here is read-only, so it runs for real even under --check
   tags: [preflight, always]
   vars:
     preflight_os_packages: >-

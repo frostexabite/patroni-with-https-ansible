@@ -1,6 +1,6 @@
 ---
-# แยกไว้ให้ playbooks/enable-tls.yml เรียกใช้ได้ (เปลี่ยน health check เป็น https ทันทีหลัง Patroni)
-# หน้า stats ใช้ cert ของ node: HAProxy ต้องการ cert + key ในไฟล์เดียว (อ่านตอน start/reload ในฐานะ root)
+# Separate so playbooks/enable-tls.yml can call it (switch health checks to https right after Patroni)
+# The stats page uses the node certificate: HAProxy wants cert + key in one file (read as root at start/reload)
 - name: Read the node certificate and key for the stats page
   ansible.builtin.slurp:
     src: "{{ item }}"

@@ -1,14 +1,14 @@
 ---
-# ไฟล์บน node (tls_dir = /etc/pki/pgha):
-#   ca.crt        0644 root      CA ของ cluster
-#   node.crt      0644 root      cert ของ node (SAN = ทุก node + VIP + tls_extra_sans)
-#   node.key      0600 root      private key ต้นฉบับ (etcdctl ผ่าน sudo)
-#   postgres.key  0600 postgres  สำเนา key ให้ PostgreSQL + Patroni (PostgreSQL บังคับ owner/permission)
-#   etcd.key      0600 etcd      สำเนา key ให้ etcd (สร้างใน role etcd)
-#   haproxy.pem   0600 root      cert + key ให้หน้า HAProxy stats (สร้างใน role haproxy)
+# Files on each node (tls_dir = /etc/pki/pgha):
+#   ca.crt        0644 root      cluster CA
+#   node.crt      0644 root      node certificate (SAN = every node + VIP + tls_extra_sans)
+#   node.key      0600 root      original private key (etcdctl via sudo)
+#   postgres.key  0600 postgres  key copy for PostgreSQL + Patroni (PostgreSQL enforces owner/permissions)
+#   etcd.key      0600 etcd      key copy for etcd (created in the etcd role)
+#   haproxy.pem   0600 root      cert + key for the HAProxy stats page (created in the haproxy role)
 #
-# SAN ใส่ชื่อ/IP ของทุก node + VIP ลงใน cert ทุกใบ เพราะ app ที่ต่อผ่าน VIP หรือ HAProxy ของ node ใดก็ได้
-# จะไปจบที่ PostgreSQL บน node ไหนก็ได้ — sslmode=verify-full จึงต้องตรงกับทุกชื่อที่ app ใช้
+# The SAN lists every node name/IP + the VIP on every certificate, because an app connecting through the VIP or any
+# node's HAProxy may land on PostgreSQL on any node — sslmode=verify-full must match every name the app uses
 - name: Install openssl
   ansible.builtin.dnf:
     name: openssl
@@ -88,8 +88,8 @@
   become: false
   vars:
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
-    # inventory ตั้ง ansible_become: true ให้ทุก host — ตัวแปรชนะ keyword become: false จึงต้องปิดด้วยตัวแปร
-    # (control node ไม่ต้องใช้ sudo และ user ที่รัน Ansible อาจ sudo ไม่ได้แบบไม่ถามรหัส)
+    # The inventory sets ansible_become: true for every host — a variable beats the become: false keyword, so disable it with a variable
+    # (the control node needs no sudo, and the user running Ansible may not have passwordless sudo)
     ansible_become: false
   when: tls_csr.stdout is defined and tls_ca_local.stat.exists
   block:
@@ -109,7 +109,7 @@
         ownca_path: "{{ tls_pki_dir }}/ca.crt"
         ownca_privatekey_path: "{{ tls_pki_dir }}/ca.key"
         ownca_privatekey_passphrase: "{{ tls_ca_passphrase }}"
-        ownca_not_before: "-1h"               # เผื่อนาฬิกาเหลื่อมกันเล็กน้อย
+        ownca_not_before: "-1h"               # allow for small clock differences
         ownca_not_after: "+{{ tls_cert_valid_days }}d"
         ownca_digest: sha256
         force: "{{ tls_current_info.valid_at.renew is defined and not tls_current_info.valid_at.renew }}"
@@ -139,7 +139,7 @@
     - Reload PostgreSQL TLS files
     - Reload Patroni TLS files
 
-# PostgreSQL ยอมรับ key ที่ owner เป็น postgres + 0600 เท่านั้น (หรือ root + 0640) → ทำสำเนาให้
+# PostgreSQL only accepts a key owned by postgres with 0600 (or root with 0640) → make a copy
 - name: Copy the key for PostgreSQL / Patroni (owner postgres, 0600)
   ansible.builtin.copy:
     src: "{{ tls_node_key }}"

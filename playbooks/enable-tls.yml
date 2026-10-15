@@ -1,22 +1,22 @@
 ---
 # =====================================================================
-#  เปิด TLS บน cluster ที่ deploy แบบ http ไปแล้ว — etcd ไม่เสีย quorum, PostgreSQL ไม่ restart
+#  Turn on TLS for a cluster already deployed over http — etcd keeps quorum, PostgreSQL is not restarted
 #    ansible-playbook playbooks/enable-tls.yml --ask-vault-pass
 #
-#  รันซ้ำได้: ทุกขั้นดูสถานะจริงก่อน (เช่น peer URL ใน etcd) แล้วข้ามขั้นที่ทำไปแล้ว
-#  ถ้าหยุดกลางทาง ให้แก้สาเหตุแล้วรันคำสั่งเดิมอีกครั้ง
+#  Safe to re-run: every step checks the real state first (e.g. etcd peer URLs) and skips finished steps
+#  If it stops half-way, fix the cause and run the same command again
 #
-#  1) CA + cert ของทุก node                                            (ไม่กระทบระบบ)
-#  2) etcd "dual1": client รับ http+https | peer เปิด https ที่ port ชั่วคราว (2381)
-#     restart ทีละ node แล้วย้าย peer URL ของแต่ละ member → https://<ip>:2381
-#  3) etcd "dual2": peer เปิด https ที่ 2380 แทน http → ย้าย peer URL → https://<ip>:2380
-#  4) PostgreSQL ssl=on ด้วย reload ก่อน → Patroni pause → patroni.yml ใหม่ (etcd https, REST API https,
-#     sslmode=verify-full ภายใน) → restart Patroni พร้อมกัน (PostgreSQL ไม่ถูก restart)
-#     → reload HAProxy (health check https) ทันที
-#  5) etcd "final": ปิด http (restart ทีละ node) → Patroni resume → ปิด port ชั่วคราว → verify
+#  1) CA + certificates for every node                                 (no impact)
+#  2) etcd "dual1": client serves http+https | peer opens https on a temporary port (2381)
+#     restart one node at a time, then move each member's peer URL → https://<ip>:2381
+#  3) etcd "dual2": peer opens https on 2380 instead of http → move peer URLs → https://<ip>:2380
+#  4) PostgreSQL ssl=on via reload first → pause Patroni → new patroni.yml (etcd https, REST API https,
+#     internal sslmode=verify-full) → restart all Patroni daemons together (PostgreSQL is not restarted)
+#     → reload HAProxy (https health checks) immediately
+#  5) etcd "final": drop http (restart one node at a time) → resume Patroni → close the temporary port → verify
 #
-#  ผลกระทบ: ช่วงขั้นที่ 4 HAProxy อาจมองไม่เห็น primary ไม่กี่วินาที (Patroni restart)
-#  แนะนำทำในช่วง maintenance window — app ยังต่อแบบไม่ใช้ SSL ได้จนกว่าจะตั้ง tls_postgres_enforce: true
+#  Impact: during step 4 HAProxy may not see the primary for a few seconds (Patroni restart)
+#  Use a maintenance window — apps can keep connecting without SSL until tls_postgres_enforce: true
 # =====================================================================
 - name: Detect target OS
   ansible.builtin.import_playbook: detect_os.yml
@@ -26,7 +26,7 @@
   gather_facts: true
   any_errors_fatal: true
   vars:
-    tls_migration: true                       # ข้าม guard ใน roles/tls (ตั้งใจเปลี่ยน scheme)
+    tls_migration: true                       # skip the guard in roles/tls (the scheme change is intended)
     etl_patronictl: "{{ patroni_venv }}/bin/patronictl -c {{ patroni_config_file }}"
     etl_etcd_base: >-
       {{ ['/usr/local/bin/etcdctl', '--dial-timeout=3s', '--command-timeout=10s',
@@ -37,7 +37,7 @@
          | map('regex_replace', '^', 'https://') | map('regex_replace', '$', ':' ~ etcd_client_port) | join(','))] }}
 
   tasks:
-    # ------------------------------------------------------------ 0) ตรวจก่อนเริ่ม
+    # ------------------------------------------------------------ 0) checks before starting
     - name: TLS must be enabled in group_vars (tls_enabled true)
       ansible.builtin.assert:
         that: tls_enabled | bool
@@ -125,9 +125,9 @@
           vars:
             etl_target_port: "{{ etcd_peer_port }}"
 
-    # ------------------------------------------------------------ 4a) PostgreSQL ssl=on ก่อน
-    # config สุดท้ายให้ Patroni ต่อ PostgreSQL ด้วย sslmode=verify-full — ถ้า PostgreSQL ยังไม่เปิด ssl
-    # Patroni ที่ restart จะต่อ PostgreSQL ไม่ได้และหยุดทำงาน จึงเปิด ssl ด้วย reload ก่อน
+    # ------------------------------------------------------------ 4a) PostgreSQL ssl=on first
+    # The final config makes Patroni connect to PostgreSQL with sslmode=verify-full — if PostgreSQL has no ssl yet,
+    # a restarted Patroni cannot connect and stops, so ssl is turned on with a reload first
     - name: Read the current patroni.yml
       ansible.builtin.slurp:
         src: "{{ patroni_config_file }}"
@@ -166,7 +166,7 @@
       changed_when: false
 
     # ------------------------------------------------------------ 4b) Patroni + HAProxy
-    # patronictl ยังใช้ patroni.yml เดิม (etcd http) ได้ เพราะ etcd ยังรับ http อยู่จนถึงขั้นที่ 5
+    # patronictl still uses the old patroni.yml (etcd http), which works because etcd keeps serving http until step 5
     - name: Step 4b - pause Patroni (PostgreSQL keeps running, no failover while we restart daemons)
       ansible.builtin.command: "{{ etl_patronictl }} pause --wait"
       register: etl_pause
@@ -188,7 +188,7 @@
         name: patroni
         tasks_from: dcs_marker.yml
 
-    # เขียน haproxy.cfg (check-ssl) ไว้ก่อน แต่ยังไม่ reload — reload ทันทีหลัง Patroni เปลี่ยนเป็น https
+    # Write haproxy.cfg (check-ssl) now but do not reload yet — reload right after Patroni switches to https
     - name: Prepare HAProxy config with https health checks
       ansible.builtin.include_role:
         name: haproxy
@@ -198,7 +198,7 @@
       ansible.builtin.systemd_service:
         name: patroni
         state: restarted
-      when: etl_patroni_conf is changed  # noqa: no-handler (ต้องเกิดตรงนี้ ก่อน reload HAProxy)
+      when: etl_patroni_conf is changed  # noqa: no-handler (must happen here, before the HAProxy reload)
 
     - name: Reload HAProxy now (health checks switch to https)
       ansible.builtin.meta: flush_handlers
@@ -225,7 +225,7 @@
       delay: 2
       run_once: true
 
-    # ------------------------------------------------------------ 5) etcd https เท่านั้น
+    # ------------------------------------------------------------ 5) etcd https only
     - name: Step 5 - etcd final (https only, advertise https)
       ansible.builtin.include_role:
         name: etcd

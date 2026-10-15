@@ -1,5 +1,5 @@
 ---
-# Build keepalived (latest) จาก Git tag — ตรวจว่า commit ตรงกับที่ pin ไว้ก่อน build
+# Build keepalived (latest) from a Git tag — checks the commit matches the pinned one before building
 - name: Remove distro keepalived package (avoid two binaries/units)
   ansible.builtin.dnf:
     name: keepalived

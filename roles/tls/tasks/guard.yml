@@ -1,7 +1,7 @@
 ---
-# อ่านอย่างเดียว: ดูว่า etcd / Patroni ที่ติดตั้งอยู่ใช้ http หรือ https แล้วเทียบกับ tls_enabled
-# การเปลี่ยนบน cluster ที่รันอยู่ต้องทำเป็นขั้น ๆ (etcd peer เปลี่ยนพร้อมกันทุก node ไม่ได้ จะเสีย quorum)
-# จึงให้ site.yml หยุดแล้วบอกให้ใช้ playbooks/enable-tls.yml แทน
+# Read-only: check whether the installed etcd / Patroni use http or https and compare with tls_enabled
+# Switching a running cluster must be done in steps (etcd peers cannot all switch at once without losing quorum)
+# so site.yml stops and points to playbooks/enable-tls.yml instead
 - name: Read the installed etcd config (TLS guard)
   ansible.builtin.slurp:
     src: /etc/etcd/etcd.conf.yml

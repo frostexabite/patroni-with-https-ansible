@@ -10,7 +10,7 @@
 {%   set peer_listen = [s ~ '://' ~ ip ~ ':' ~ etcd_peer_port] %}
 {% endif %}
 {% if stage in ['dual1', 'dual2'] %}
-{#   etcd ให้บริการ http และ https บน port เดียวกันได้ (แยกด้วย TLS handshake) #}
+{#   etcd can serve http and https on the same port (told apart by the TLS handshake) #}
 {%   set client_listen = ['http', 'https'] | product([ip, '127.0.0.1']) | map('join', '://') | map('regex_replace', '$', ':' ~ etcd_client_port) | list %}
 {%   set client_adv = 'http' %}
 {% else %}
@@ -31,8 +31,8 @@ initial-cluster-token: {{ etcd_cluster_token }}
 initial-cluster-state: new
 {% if tls_enabled | bool %}
 
-# mutual TLS: client (Patroni, etcdctl) และ peer ต้องแสดง cert ที่ออกโดย CA ของ cluster
-# etcd อ่าน cert ใหม่เองทุก connection → ต่ออายุ cert ไม่ต้อง restart
+# mutual TLS: clients (Patroni, etcdctl) and peers must present a certificate signed by the cluster CA
+# etcd re-reads certificates on every connection → certificate renewal needs no restart
 client-transport-security:
   cert-file: {{ tls_node_cert }}
   key-file: {{ tls_etcd_key }}

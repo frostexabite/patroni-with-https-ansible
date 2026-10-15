@@ -1,5 +1,5 @@
 ---
-# ตรวจซ้ำจาก facts (playbooks/detect_os.yml ตรวจไว้แล้วด้วย /etc/os-release)
+# Re-check from facts (playbooks/detect_os.yml already checked /etc/os-release)
 - name: Verify target OS is Rocky Linux / RHEL family 8, 9 or 10
   ansible.builtin.assert:
     that:
@@ -28,7 +28,7 @@
       {% endfor %}
   when: manage_etc_hosts | bool
 
-# binding ของ SELinux / setuptools ติดตั้งให้ Python ของระบบ (EL8 = platform-python)
+# SELinux / setuptools bindings are installed for the system Python (EL8 = platform-python)
 - name: Install base packages
   ansible.builtin.dnf:
     name:
@@ -44,7 +44,7 @@
       - "{{ os_system_python_setuptools[el_major] | default('python3-setuptools') }}"
     state: "{{ package_state }}"
 
-- name: Upgrade all OS packages to the latest available  # noqa: package-latest (ต้องการ latest โดยเจตนา)
+- name: Upgrade all OS packages to the latest available  # noqa: package-latest (latest is intended)
   ansible.builtin.dnf:
     name: "*"
     state: latest

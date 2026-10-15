@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# ป้องกันการ commit ไฟล์ vault ที่ยังไม่ได้เข้ารหัส
-# เปิดใช้:  git config core.hooksPath scripts/git-hooks
+# Refuse to commit vault files that are not encrypted
+# Enable with:  git config core.hooksPath scripts/git-hooks
 set -euo pipefail
 
 status=0
@@ -12,7 +12,7 @@ while IFS= read -r f; do
   fi
 done < <(git diff --cached --name-only --diff-filter=ACM | grep -E '(^|/)vault\.ya?ml$' || true)
 
-# CA key ของ cluster (inventory/pki/ca.key หรือ inventories/*/pki/ca.key) ต้องเข้ารหัสเสมอ
+# The cluster CA key (inventory/pki/ca.key or inventories/*/pki/ca.key) must always be encrypted
 while IFS= read -r f; do
   [ -f "$f" ] || continue
   if ! grep -q 'ENCRYPTED PRIVATE KEY' "$f"; then

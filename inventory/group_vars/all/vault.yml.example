@@ -1,5 +1,5 @@
 ---
-# คัดลอกเป็น vault.yml แล้วเข้ารหัสก่อน commit:
+# Copy to vault.yml, then encrypt it before committing:
 #   cp inventory/group_vars/all/vault.yml.example inventory/group_vars/all/vault.yml
 #   vi inventory/group_vars/all/vault.yml
 #   ansible-vault encrypt inventory/group_vars/all/vault.yml
@@ -8,5 +8,5 @@ vault_pg_replication_password: "ChangeMe-Repl-123"
 vault_pg_rewind_password: "ChangeMe-Rewind-123"
 vault_patroni_restapi_password: "ChangeMe-Api-123"
 vault_haproxy_stats_password: "ChangeMe-Stats-123"
-vault_keepalived_auth_pass: "Kp8chars"   # ไม่เกิน 8 ตัวอักษร
-vault_tls_ca_passphrase: "ChangeMe-CA-Key-123"   # เข้ารหัส inventory/pki/ca.key (CA ของ cluster) — ห้ามลืม
+vault_keepalived_auth_pass: "Kp8chars"   # at most 8 characters
+vault_tls_ca_passphrase: "ChangeMe-CA-Key-123"   # encrypts inventory/pki/ca.key (the cluster CA) — do not lose it

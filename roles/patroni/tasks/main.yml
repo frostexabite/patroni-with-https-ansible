@@ -1,6 +1,6 @@
 ---
-# ติดตั้ง Patroni ใน virtualenv (ไม่ pip install ลง system python)
-# psycopg 3.3 ต้องใช้ Python >= 3.10 → EL8/EL9 ใช้ python3.12 จาก AppStream, EL10 ใช้ python3 (3.12)
+# Install Patroni into a virtualenv (no pip install into the system Python)
+# psycopg 3.3 needs Python >= 3.10 → EL8/EL9 use python3.12 from AppStream, EL10 uses python3 (3.12)
 - name: Install Python for the Patroni virtualenv ({{ patroni_python }})
   ansible.builtin.dnf:
     name: "{{ patroni_python_packages }}"
@@ -32,7 +32,7 @@
   ansible.builtin.set_fact:
     patroni_was_active: "{{ (patroni_state.status | default({})).ActiveState | default('') == 'active' }}"
 
-# venv ที่สร้างด้วย Python คนละตัว (เช่น ย้ายจาก python3.11 → 3.12) ต้องสร้างใหม่
+# A venv built with another Python (e.g. moving from python3.11 → 3.12) must be rebuilt
 - name: Read the Python version of the existing virtualenv
   ansible.builtin.command: "{{ patroni_venv }}/bin/python -c 'import sys; print(\"%d.%d\" % sys.version_info[:2])'"
   register: patroni_venv_version
@@ -46,7 +46,7 @@
     - patroni_python_version.rc == 0
     - patroni_venv_version.stdout | trim != patroni_python_version.stdout | trim
   block:
-    # ลบ venv ใต้ Patroni ที่กำลังรันไม่ปลอดภัย → ให้ทำเป็นงาน maintenance
+    # Removing the venv under a running Patroni is unsafe → do it as maintenance
     - name: Stop when Patroni is running from the old virtualenv
       ansible.builtin.fail:
         msg: >-
@@ -93,7 +93,7 @@
     owner: postgres
     group: postgres
     mode: "0600"
-    # --validate-config จะทดสอบ bind port ด้วย จึงใช้ได้เฉพาะตอนที่ Patroni ยังไม่รัน
+    # --validate-config also tries to bind the ports, so it can only run while Patroni is stopped
     validate: "{{ (patroni_venv ~ '/bin/patroni --validate-config %s') if not patroni_was_active | bool else omit }}"
   notify: Reload patroni
 
@@ -111,7 +111,7 @@
     dest: /etc/profile.d/patroni.sh
     mode: "0644"
     content: |
-      # Ansible managed (roles/patroni) — แก้ที่ project แทนการแก้ไฟล์นี้
+      # Ansible managed (roles/patroni) — change the project instead of this file
       export PATRONICTL_CONFIG_FILE={{ patroni_config_file }}
       # pctl list | pctl history | pctl show-config | pctl switchover ...
       alias pctl='sudo {{ patroni_venv }}/bin/patronictl -c {{ patroni_config_file }}'
@@ -123,12 +123,12 @@
     mode: "0644"
   register: patroni_unit
 
-# ใช้ config ใหม่ (เช่น pg_hba) กับ node ที่รันอยู่ทันที ก่อนรอ replica
-# ไม่อย่างนั้น replica จะรอ pg_hba ที่ยังไม่ถูก reload จน timeout
+# Apply the new config (e.g. pg_hba) to running nodes right away, before waiting for replicas
+# otherwise replicas wait for a pg_hba that was never reloaded until they time out
 - name: Apply Patroni config changes now (reload running members)
   ansible.builtin.meta: flush_handlers
 
-# ---- เริ่ม node bootstrap ก่อน แล้วรอให้มี Leader ----
+# ---- Start the bootstrap node first and wait for a Leader ----
 - name: Start Patroni on bootstrap node
   ansible.builtin.systemd_service:
     name: patroni
@@ -150,7 +150,7 @@
   delay: 5
   run_once: true
 
-# ---- เริ่ม replica ทีละตัว (clone จาก leader ด้วย pg_basebackup) ----
+# ---- Start replicas one at a time (cloned from the leader with pg_basebackup) ----
 - name: Start Patroni on replica nodes (one at a time)
   ansible.builtin.systemd_service:
     name: patroni
@@ -170,9 +170,9 @@
   retries: "{{ patroni_replica_wait_retries }}"
   delay: 10
 
-# ---- อัปเกรด Patroni / แก้ unit บน cluster ที่รันอยู่แล้ว ----
-# การ stop Patroni ปกติจะ stop PostgreSQL ด้วย (และ leader จะ failover)
-# จึงต้อง pause cluster ก่อน restart Patroni แล้วค่อย resume
+# ---- Upgrading Patroni / changing the unit on a running cluster ----
+# Stopping Patroni normally stops PostgreSQL too (and the leader would fail over)
+# so the cluster is paused before restarting Patroni, then resumed
 - name: Rolling restart of Patroni daemons (maintenance mode)
   when:
     - patroni_was_active | bool

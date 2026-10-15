@@ -1,6 +1,6 @@
 ---
 # =====================================================================
-#  ตรวจสุขภาพ cluster ทั้งหมด (อ่านอย่างเดียว)
+#  Health check of the whole cluster (read-only)
 #    ansible-playbook playbooks/verify.yml --ask-vault-pass
 # =====================================================================
 - name: Detect target OS
@@ -9,8 +9,8 @@
 - name: Verify PostgreSQL HA cluster
   hosts: pg_cluster
   gather_facts: true
-  gather_subset: [min]         # ต้องรู้ EL major เพื่อหา path ของ psql (PGDG / AppStream)
-  check_mode: false            # ทุก task อ่านอย่างเดียว
+  gather_subset: [min]         # EL major is needed to find psql (PGDG / AppStream)
+  check_mode: false            # every task is read-only
   vars:
     verify_etcd_endpoints: >-
       {{ groups['pg_cluster'] | map('extract', hostvars, 'node_ip')
@@ -18,7 +18,7 @@
     verify_etcdctl: >-
       {{ ['/usr/local/bin/etcdctl', '--endpoints=' ~ verify_etcd_endpoints]
          + (['--cacert=' ~ tls_ca_cert, '--cert=' ~ tls_node_cert, '--key=' ~ tls_node_key] if tls_enabled | bool else []) }}
-    # libpq: verify-full = เข้ารหัส + ตรวจว่า cert ออกโดย CA ของ cluster และชื่อ (VIP/IP) ตรงกับ SAN
+    # libpq: verify-full = encrypted + certificate signed by the cluster CA + name (VIP/IP) matches the SAN
     verify_pg_env: >-
       {{ {'PGPASSWORD': pg_superuser_password, 'PGCONNECT_TIMEOUT': '5'}
          | combine({'PGSSLMODE': 'verify-full', 'PGSSLROOTCERT': tls_ca_cert} if tls_enabled | bool else {}) }}

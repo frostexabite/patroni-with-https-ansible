@@ -1,9 +1,9 @@
 ---
-# แหล่งติดตั้ง PostgreSQL (pg_install_source → pg_install_source_effective):
+# PostgreSQL install source (pg_install_source → pg_install_source_effective):
 #   auto      = EL10 → appstream | EL8/EL9 → pgdg
-#   appstream = แพ็กเกจของ OS binary อยู่ /usr/bin, ได้ security errata จาก Red Hat / Rocky
-#               EL8/9 = module stream postgresql:<ver> | EL10 = แพ็กเกจ postgresql<ver>
-#   pgdg      = แพ็กเกจของ PostgreSQL.org binary อยู่ /usr/pgsql-<ver>/bin (เหมือนกันทุก EL)
+#   appstream = OS packages, binaries in /usr/bin, security errata from Red Hat / Rocky
+#               EL8/9 = module stream postgresql:<ver> | EL10 = package postgresql<ver>
+#   pgdg      = PostgreSQL.org packages, binaries in /usr/pgsql-<ver>/bin (same on every EL)
 - name: Validate pg_install_source
   ansible.builtin.assert:
     that: pg_install_source in ['auto', 'appstream', 'pgdg']
@@ -49,7 +49,7 @@
       Check with: dnf info --installed {{ pg_pkg_prefix }}-server | grep 'From repo'
     quiet: true
 
-# Patroni เป็นผู้ควบคุม PostgreSQL — ห้ามให้ unit ของแพ็กเกจรันเอง
+# Patroni controls PostgreSQL — the package's own unit must never run it
 - name: Make sure the packaged PostgreSQL units are disabled
   ansible.builtin.systemd_service:
     name: "{{ item }}"
@@ -60,7 +60,7 @@
     - "postgresql-{{ pg_version }}"
   failed_when: false
 
-# ห้าม initdb เอง — Patroni จะ bootstrap data directory
+# Never run initdb by hand — Patroni bootstraps the data directory
 - name: Create data directory (empty, owned by postgres)
   ansible.builtin.file:
     path: "{{ pg_data_dir }}"
