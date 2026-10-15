@@ -1,0 +1,32 @@
+---
+# ใช้โดย playbooks/enable-tls.yml: ย้าย peer URL ของทุก member ไปที่ https://<ip>:<etl_target_port>
+# ทุก node ฟัง port ปลายทางอยู่แล้ว (dual1/dual2) จึงย้ายทีละ member ได้โดย quorum ไม่หาย
+- name: Read etcd membership
+  ansible.builtin.command:
+    argv: "{{ etl_etcdctl + ['member', 'list', '-w', 'json'] }}"
+  register: etl_move_members
+  changed_when: false
+  run_once: true
+
+- name: Update peer URL (member update)
+  ansible.builtin.command:
+    argv: >-
+      {{ etl_etcdctl + ['member', 'update', '%x' | format(item.ID),
+         '--peer-urls=https://' ~ (item.peerURLs[0] | urlsplit('hostname')) ~ ':' ~ etl_target_port] }}
+  loop: >-
+    {{ (etl_move_members.stdout | from_json).members
+       | rejectattr('peerURLs.0', 'match', '^https://[^/]+:' ~ etl_target_port ~ '$') | list }}
+  loop_control:
+    label: "{{ item.name }} {{ item.peerURLs[0] }} -> https:{{ etl_target_port }}"
+  changed_when: true
+  run_once: true
+
+- name: Wait until every etcd member is healthy
+  ansible.builtin.command:
+    argv: "{{ etl_etcdctl_all + ['endpoint', 'health'] }}"
+  register: etl_move_health
+  until: etl_move_health.rc == 0
+  retries: 30
+  delay: 3
+  changed_when: false
+  run_once: true

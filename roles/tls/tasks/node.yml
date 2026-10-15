@@ -1,0 +1,154 @@
+---
+# ไฟล์บน node (tls_dir = /etc/pki/pgha):
+#   ca.crt        0644 root      CA ของ cluster
+#   node.crt      0644 root      cert ของ node (SAN = ทุก node + VIP + tls_extra_sans)
+#   node.key      0600 root      private key ต้นฉบับ (etcdctl ผ่าน sudo)
+#   postgres.key  0600 postgres  สำเนา key ให้ PostgreSQL + Patroni (PostgreSQL บังคับ owner/permission)
+#   etcd.key      0600 etcd      สำเนา key ให้ etcd (สร้างใน role etcd)
+#   haproxy.pem   0600 root      cert + key ให้หน้า HAProxy stats (สร้างใน role haproxy)
+#
+# SAN ใส่ชื่อ/IP ของทุก node + VIP ลงใน cert ทุกใบ เพราะ app ที่ต่อผ่าน VIP หรือ HAProxy ของ node ใดก็ได้
+# จะไปจบที่ PostgreSQL บน node ไหนก็ได้ — sslmode=verify-full จึงต้องตรงกับทุกชื่อที่ app ใช้
+- name: Install openssl
+  ansible.builtin.dnf:
+    name: openssl
+    state: "{{ package_state }}"
+
+- name: Create {{ tls_dir }}
+  ansible.builtin.file:
+    path: "{{ tls_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Generate the node private key (created on the node, never copied off it)
+  ansible.builtin.shell:
+    cmd: "umask 077 && openssl genpkey {{ tls_genpkey_args }} -out {{ tls_node_key | quote }}"
+    creates: "{{ tls_node_key }}"
+  vars:
+    tls_genpkey_args: >-
+      {{ ('-algorithm RSA -pkeyopt rsa_keygen_bits:' ~ tls_key_size) if tls_key_type == 'RSA'
+         else '-algorithm EC -pkeyopt ec_paramgen_curve:secp384r1' }}
+
+- name: Protect the node private key
+  ansible.builtin.file:
+    path: "{{ tls_node_key }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: not ansible_check_mode
+
+- name: Build the subjectAltName list
+  ansible.builtin.set_fact:
+    tls_node_sans: >-
+      {{ (['DNS:' ~ inventory_hostname, 'IP:' ~ node_ip]
+          + (groups['pg_cluster'] | map('regex_replace', '^', 'DNS:') | list)
+          + (groups['pg_cluster'] | map('extract', hostvars, 'node_ip') | map('regex_replace', '^', 'IP:') | list)
+          + (['IP:' ~ keepalived_vip] if keepalived_on | bool else [])
+          + ['DNS:localhost', 'IP:127.0.0.1']
+          + tls_extra_sans) | unique }}
+
+- name: Check whether the node key exists (check mode on a fresh node has none yet)
+  ansible.builtin.stat:
+    path: "{{ tls_node_key }}"
+  register: tls_key_stat
+
+- name: Create the certificate signing request
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -new
+      - -sha256
+      - -key
+      - "{{ tls_node_key }}"
+      - -subj
+      - "/CN={{ inventory_hostname }}"
+      - -addext
+      - "subjectAltName={{ tls_node_sans | join(',') }}"
+      - -addext
+      - "keyUsage=critical,{{ 'digitalSignature,keyEncipherment' if tls_key_type == 'RSA' else 'digitalSignature' }}"
+      - -addext
+      - "extendedKeyUsage=serverAuth,clientAuth"
+  register: tls_csr
+  changed_when: false
+  check_mode: false
+  when: tls_key_stat.stat.exists
+
+- name: Read the current node certificate
+  ansible.builtin.slurp:
+    src: "{{ tls_node_cert }}"
+  register: tls_current_cert
+  failed_when: false
+  check_mode: false
+
+- name: Sign, renew or keep the node certificate (control node)
+  delegate_to: localhost
+  become: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    # inventory ตั้ง ansible_become: true ให้ทุก host — ตัวแปรชนะ keyword become: false จึงต้องปิดด้วยตัวแปร
+    # (control node ไม่ต้องใช้ sudo และ user ที่รัน Ansible อาจ sudo ไม่ได้แบบไม่ถามรหัส)
+    ansible_become: false
+  when: tls_csr.stdout is defined and tls_ca_local.stat.exists
+  block:
+    - name: Check the remaining lifetime of the current certificate
+      community.crypto.x509_certificate_info:
+        content: "{{ tls_current_cert.content | b64decode }}"
+        valid_at:
+          renew: "+{{ tls_cert_renew_days }}d"
+      register: tls_current_info
+      when: tls_current_cert.content is defined
+
+    - name: Sign the node certificate with the cluster CA
+      community.crypto.x509_certificate_pipe:
+        content: "{{ (tls_current_cert.content | b64decode) if tls_current_cert.content is defined else omit }}"
+        csr_content: "{{ tls_csr.stdout }}"
+        provider: ownca
+        ownca_path: "{{ tls_pki_dir }}/ca.crt"
+        ownca_privatekey_path: "{{ tls_pki_dir }}/ca.key"
+        ownca_privatekey_passphrase: "{{ tls_ca_passphrase }}"
+        ownca_not_before: "-1h"               # เผื่อนาฬิกาเหลื่อมกันเล็กน้อย
+        ownca_not_after: "+{{ tls_cert_valid_days }}d"
+        ownca_digest: sha256
+        force: "{{ tls_current_info.valid_at.renew is defined and not tls_current_info.valid_at.renew }}"
+      register: tls_signed
+
+- name: Install the node certificate
+  ansible.builtin.copy:
+    content: "{{ tls_signed.certificate }}"
+    dest: "{{ tls_node_cert }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: tls_signed.certificate is defined
+  notify:
+    - Reload PostgreSQL TLS files
+    - Reload Patroni TLS files
+
+- name: Install the cluster CA certificate
+  ansible.builtin.copy:
+    src: "{{ tls_pki_dir }}/ca.crt"
+    dest: "{{ tls_ca_cert }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: tls_ca_local.stat.exists
+  notify:
+    - Reload PostgreSQL TLS files
+    - Reload Patroni TLS files
+
+# PostgreSQL ยอมรับ key ที่ owner เป็น postgres + 0600 เท่านั้น (หรือ root + 0640) → ทำสำเนาให้
+- name: Copy the key for PostgreSQL / Patroni (owner postgres, 0600)
+  ansible.builtin.copy:
+    src: "{{ tls_node_key }}"
+    dest: "{{ tls_postgres_key }}"
+    remote_src: true
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  when: tls_key_stat.stat.exists
+  notify:
+    - Reload PostgreSQL TLS files
+    - Reload Patroni TLS files

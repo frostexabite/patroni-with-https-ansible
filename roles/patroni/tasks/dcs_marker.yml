@@ -1,0 +1,19 @@
+---
+# Patroni อ่านส่วน etcd3 (host / protocol / cert) ตอน start เท่านั้น — reload ไม่พอ
+# เก็บสำเนาส่วนนี้ไว้เทียบ: เปลี่ยนเมื่อไร → rolling restart แบบ maintenance mode ด้านล่าง
+- name: Record the DCS connection settings (changes need a Patroni restart)
+  ansible.builtin.copy:
+    dest: "{{ patroni_config_dir }}/.dcs-connection"
+    owner: postgres
+    group: postgres
+    mode: "0600"
+    content: |
+      # Ansible managed (roles/patroni) — ใช้ตัดสินว่าต้อง restart Patroni หรือไม่
+      scheme: {{ tls_scheme }}
+      hosts: {{ groups['pg_cluster'] | map('extract', hostvars, 'node_ip') | join(',') }}:{{ etcd_client_port }}
+      {% if tls_enabled | bool %}
+      cacert: {{ tls_ca_cert }}
+      cert: {{ tls_node_cert }}
+      key: {{ tls_postgres_key }}
+      {% endif %}
+  register: patroni_dcs_conn

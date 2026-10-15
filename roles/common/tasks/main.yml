@@ -1,0 +1,89 @@
+---
+# ตรวจซ้ำจาก facts (playbooks/detect_os.yml ตรวจไว้แล้วด้วย /etc/os-release)
+- name: Verify target OS is Rocky Linux / RHEL family 8, 9 or 10
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] == 'RedHat'
+      - el_major in os_supported_major_versions
+    fail_msg: >-
+      Target is {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
+      This project supports Rocky Linux / RHEL {{ os_supported_major_versions | join(', ') }}
+      (set allow_unsupported_os=true to override).
+    quiet: true
+  when: not allow_unsupported_os | bool
+
+- name: Set hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+    use: systemd
+  when: set_hostname | bool
+
+- name: Add cluster nodes to /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED - pg_cluster"
+    block: |
+      {% for h in groups['pg_cluster'] %}
+      {{ hostvars[h]['node_ip'] }} {{ h }}
+      {% endfor %}
+  when: manage_etc_hosts | bool
+
+# binding ของ SELinux / setuptools ติดตั้งให้ Python ของระบบ (EL8 = platform-python)
+- name: Install base packages
+  ansible.builtin.dnf:
+    name:
+      - chrony
+      - tar
+      - psmisc
+      - iputils
+      - python3-libselinux
+      - python3-libsemanage
+      - policycoreutils-python-utils
+      - bash-completion
+      - dnf-plugins-core
+      - "{{ os_system_python_setuptools[el_major] | default('python3-setuptools') }}"
+    state: "{{ package_state }}"
+
+- name: Upgrade all OS packages to the latest available  # noqa: package-latest (ต้องการ latest โดยเจตนา)
+  ansible.builtin.dnf:
+    name: "*"
+    state: latest
+    update_cache: true
+  when: os_update_all | bool
+
+- name: Check whether a reboot is required after updates
+  ansible.builtin.command: dnf needs-restarting -r
+  register: common_needs_reboot
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: os_update_all | bool
+
+- name: Warn when reboot is required
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }} has updated core packages (kernel/glibc/systemd); plan a rolling reboot."
+  when:
+    - os_update_all | bool
+    - common_needs_reboot.rc | default(0) == 1
+
+- name: Enable time sync (chronyd)
+  ansible.builtin.systemd_service:
+    name: chronyd
+    state: started
+    enabled: true
+
+- name: Set SELinux state
+  ansible.posix.selinux:
+    policy: targeted
+    state: "{{ selinux_state }}"
+  register: common_selinux
+  when: ansible_facts['selinux']['status'] | default('disabled') != 'disabled'
+
+- name: Warn when SELinux change needs reboot
+  ansible.builtin.debug:
+    msg: "SELinux change on {{ inventory_hostname }} requires a reboot to take full effect."
+  when: common_selinux.reboot_required | default(false)
+
+- name: Configure firewalld
+  ansible.builtin.include_tasks: firewall.yml
+  when: firewall_enabled | bool

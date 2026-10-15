@@ -1,0 +1,16 @@
+---
+# https เมื่อ tls_enabled (etcd_client_scheme override ได้ — ใช้ใน playbooks/enable-tls.yml)
+etcd_client_scheme: "{{ tls_scheme }}"
+etcd_endpoints: >-
+  {{ groups['pg_cluster'] | map('extract', hostvars, 'node_ip')
+     | map('regex_replace', '^', etcd_client_scheme ~ '://') | map('regex_replace', '$', ':' ~ etcd_client_port) | join(',') }}
+# argument ของ etcdctl สำหรับ TLS (client cert ของ node — อ่านได้เฉพาะ root)
+etcdctl_tls_args: >-
+  {{ ['--cacert=' ~ tls_ca_cert, '--cert=' ~ tls_node_cert, '--key=' ~ tls_node_key]
+     if etcd_client_scheme == 'https' else [] }}
+
+# ---- ขั้นตอนย้าย cluster เดิมเป็น TLS (playbooks/enable-tls.yml ตั้งค่าเหล่านี้เอง — ปกติไม่ต้องแตะ) ----
+#   final  = ค่าปกติ (ตาม tls_enabled)
+#   dual1  = client: http+https port เดียวกัน (ประกาศ http) | peer: http:2380 + https:<etcd_peer_port_tmp>
+#   dual2  = client: http+https port เดียวกัน (ประกาศ http) | peer: https:<tmp> + https:2380
+etcd_tls_stage: final

@@ -1,0 +1,38 @@
+---
+# อ่านอย่างเดียว: ดูว่า etcd / Patroni ที่ติดตั้งอยู่ใช้ http หรือ https แล้วเทียบกับ tls_enabled
+# การเปลี่ยนบน cluster ที่รันอยู่ต้องทำเป็นขั้น ๆ (etcd peer เปลี่ยนพร้อมกันทุก node ไม่ได้ จะเสีย quorum)
+# จึงให้ site.yml หยุดแล้วบอกให้ใช้ playbooks/enable-tls.yml แทน
+- name: Read the installed etcd config (TLS guard)
+  ansible.builtin.slurp:
+    src: /etc/etcd/etcd.conf.yml
+  register: tls_guard_etcd
+  failed_when: false
+  check_mode: false
+  when: not (tls_migration | default(false) | bool)
+
+- name: Read the installed Patroni config (TLS guard)
+  ansible.builtin.slurp:
+    src: "{{ patroni_config_file }}"
+  register: tls_guard_patroni
+  failed_when: false
+  check_mode: false
+  when: not (tls_migration | default(false) | bool)
+
+- name: Stop when the running cluster uses a different scheme than tls_enabled
+  vars:
+    tls_guard_etcd_text: "{{ (tls_guard_etcd.content | default('')) | b64decode }}"
+    tls_guard_patroni_text: "{{ (tls_guard_patroni.content | default('')) | b64decode }}"
+    tls_guard_etcd_now: "{{ 'https' if tls_guard_etcd_text is search('(?m)^listen-peer-urls:.*https://') else 'http' }}"
+    tls_guard_patroni_now: "{{ 'https' if tls_guard_patroni_text is search('(?m)^\\s+certfile:') else 'http' }}"
+  ansible.builtin.assert:
+    that:
+      - tls_guard_etcd_text | length == 0 or tls_guard_etcd_now == tls_scheme
+      - tls_guard_patroni_text | length == 0 or tls_guard_patroni_now == tls_scheme
+    fail_msg: >-
+      {{ inventory_hostname }} runs etcd over {{ tls_guard_etcd_now }} and the Patroni REST API over
+      {{ tls_guard_patroni_now }}, but tls_enabled={{ tls_enabled }} wants {{ tls_scheme }}.
+      Switching a live cluster in one pass would break etcd quorum and HAProxy health checks.
+      To turn TLS on run: ansible-playbook playbooks/enable-tls.yml --ask-vault-pass  (see docs/TLS.md).
+      To keep the cluster as it is, set tls_enabled: {{ (tls_scheme == 'http') | lower }}.
+    quiet: true
+  when: not (tls_migration | default(false) | bool)

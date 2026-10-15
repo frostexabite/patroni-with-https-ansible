@@ -1,0 +1,63 @@
+# {{ ansible_managed }}
+# HAProxy ใช้ Patroni REST API (port {{ patroni_restapi_port }}) ตรวจว่า node ไหนเป็น primary/replica
+#   /primary -> 200 เฉพาะ leader      (แทน /master ที่ deprecated แล้ว)
+#   /replica -> 200 เฉพาะ replica ที่ streaming อยู่
+{% if tls_enabled | bool %}
+# TLS: health check ต่อ Patroni แบบ https (check-ssl) และตรวจ cert ด้วย CA ของ cluster
+#      port 5000/5001 เป็น TCP passthrough — TLS ของ app ไปจบที่ PostgreSQL เอง (cert ของ node)
+{% endif %}
+{% set chk = ' check-ssl verify required ca-file ' ~ tls_ca_cert if tls_enabled | bool else '' %}
+global
+    log stdout format raw local0
+    maxconn {{ haproxy_maxconn }}
+    user haproxy
+    group haproxy
+    stats socket /var/lib/haproxy/stats mode 660 level admin
+    # handler "Reload haproxy" บันทึกสถานะ UP/DOWN ไว้ก่อน reload → process ใหม่ไม่ส่ง write ไป replica
+    # ระหว่างรอ health check รอบแรก (ค่าเริ่มต้นของ HAProxy ถือว่าทุก server UP)
+    server-state-file /var/lib/haproxy/server-state
+{% if tls_enabled | bool %}
+    ssl-default-bind-options ssl-min-ver {{ tls_min_protocol }}
+    ssl-default-server-options ssl-min-ver {{ tls_min_protocol }}
+{% endif %}
+
+defaults
+    log global
+    load-server-state-from-file global
+    mode tcp
+    option tcplog
+    retries 2
+    timeout client 30m
+    timeout connect 4s
+    timeout server 30m
+    timeout check 5s
+
+listen stats
+    mode http
+    bind *:{{ haproxy_stats_port }}{{ (' ssl crt ' ~ tls_haproxy_pem) if tls_enabled | bool else '' }}
+    stats enable
+    stats uri /
+    stats refresh 10s
+    # quote ไว้: ถ้าไม่ quote ตัว # ในรหัสผ่านจะกลายเป็น comment (รหัสถูกตัดเหลือแค่ส่วนหน้า #)
+    stats auth '{{ (haproxy_stats_user ~ ':' ~ haproxy_stats_password) | replace("'", "'\\''") }}'
+
+listen postgres_write
+    bind *:{{ haproxy_write_port }}
+    option httpchk
+    http-check send meth GET uri /primary
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+{% for h in groups['pg_cluster'] %}
+    server {{ h }} {{ hostvars[h]['node_ip'] }}:{{ pg_port }} maxconn {{ haproxy_backend_maxconn }} check port {{ patroni_restapi_port }}{{ chk }}
+{% endfor %}
+
+listen postgres_read
+    bind *:{{ haproxy_read_port }}
+    balance roundrobin
+    option httpchk
+    http-check send meth GET uri {{ haproxy_read_check_uri }}
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+{% for h in groups['pg_cluster'] %}
+    server {{ h }} {{ hostvars[h]['node_ip'] }}:{{ pg_port }} maxconn {{ haproxy_backend_maxconn }} check port {{ patroni_restapi_port }}{{ chk }}
+{% endfor %}

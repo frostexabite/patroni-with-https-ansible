@@ -1,0 +1,25 @@
+---
+# reload แบบ master-worker: master re-exec ตัวเอง จึงได้ binary ใหม่ด้วยโดยไม่ตัด connection เดิม
+- name: Save HAProxy server state before reload
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    echo "show servers state" | socat stdio UNIX-CONNECT:/var/lib/haproxy/stats
+    > /var/lib/haproxy/server-state.new && mv -f /var/lib/haproxy/server-state.new /var/lib/haproxy/server-state
+  args:
+    executable: /bin/bash
+  changed_when: true
+  failed_when: false
+  listen: Reload haproxy
+
+- name: Reload HAProxy service
+  ansible.builtin.systemd_service:
+    name: haproxy
+    state: reloaded
+  listen: Reload haproxy
+
+- name: Restart haproxy
+  ansible.builtin.systemd_service:
+    name: haproxy
+    state: restarted
+    daemon_reload: true
+  throttle: 1

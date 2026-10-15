@@ -1,0 +1,22 @@
+# {{ ansible_managed }}
+# Based on upstream admin/systemd/haproxy.service.in (HAProxy {{ haproxy_version }})
+[Unit]
+Description=HAProxy Load Balancer
+Documentation=https://docs.haproxy.org/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=-/etc/sysconfig/haproxy
+Environment="CONFIG=/etc/haproxy/haproxy.cfg" "PIDFILE=/run/haproxy.pid" "CFGDIR=/etc/haproxy/conf.d" "EXTRAOPTS=-S /run/haproxy-master.sock"
+ExecStart={{ haproxy_bin }} -Ws -f $CONFIG -f $CFGDIR -p $PIDFILE $EXTRAOPTS
+ExecReload={{ haproxy_bin }} -Ws -f $CONFIG -f $CFGDIR -c $EXTRAOPTS
+ExecReload=/bin/kill -USR2 $MAINPID
+KillMode=mixed
+Restart=always
+SuccessExitStatus=143
+Type=notify
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

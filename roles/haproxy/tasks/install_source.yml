@@ -1,0 +1,81 @@
+---
+# Build HAProxy (latest LTS) จาก source ของ haproxy.org — ตรวจ SHA256 ก่อน build
+- name: Remove distro HAProxy package (avoid two binaries/units)
+  ansible.builtin.dnf:
+    name: haproxy
+    state: absent
+
+- name: Create haproxy group
+  ansible.builtin.group:
+    name: haproxy
+    system: true
+
+- name: Create haproxy user
+  ansible.builtin.user:
+    name: haproxy
+    group: haproxy
+    system: true
+    shell: /sbin/nologin
+    home: /var/lib/haproxy
+    create_home: false
+
+- name: Create HAProxy directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: haproxy
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/haproxy, owner: root, mode: "0750" }
+    - { path: /etc/haproxy/conf.d, owner: root, mode: "0750" }
+    - { path: /var/lib/haproxy, owner: haproxy, mode: "0750" }
+
+- name: Check installed HAProxy version
+  ansible.builtin.command: "{{ haproxy_bin }} -v"
+  register: haproxy_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Build and install HAProxy {{ haproxy_version }}
+  when: ("HAProxy version " ~ haproxy_version ~ " ") not in (haproxy_installed.stdout | default(''))
+  block:
+    - name: Install build dependencies
+      ansible.builtin.dnf:
+        name: [gcc, make, tar, openssl-devel, pcre2-devel]
+        state: "{{ package_state }}"
+
+    - name: Download HAProxy source (verified with .sha256)
+      ansible.builtin.get_url:
+        url: "{{ haproxy_download_url }}"
+        dest: "{{ build_src_dir }}/haproxy-{{ haproxy_version }}.tar.gz"
+        checksum: "sha256:{{ haproxy_download_url }}.sha256"
+        mode: "0644"
+
+    - name: Extract HAProxy source
+      ansible.builtin.unarchive:
+        src: "{{ build_src_dir }}/haproxy-{{ haproxy_version }}.tar.gz"
+        dest: "{{ build_src_dir }}"
+        remote_src: true
+      when: not ansible_check_mode
+
+    - name: Compile HAProxy
+      ansible.builtin.command:
+        cmd: "make -j{{ ansible_facts['processor_vcpus'] | default(2) }} {{ haproxy_make_options }}"
+        chdir: "{{ build_src_dir }}/haproxy-{{ haproxy_version }}"
+      changed_when: true
+
+    - name: Install HAProxy binary to /usr/local/sbin
+      ansible.builtin.command:
+        cmd: make install PREFIX=/usr/local
+        chdir: "{{ build_src_dir }}/haproxy-{{ haproxy_version }}"
+      changed_when: true
+      notify: Reload haproxy
+
+- name: Write HAProxy systemd unit
+  ansible.builtin.template:
+    src: haproxy.service.j2
+    dest: /etc/systemd/system/haproxy.service
+    mode: "0644"
+  notify: Restart haproxy

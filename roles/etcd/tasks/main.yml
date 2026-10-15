@@ -1,0 +1,153 @@
+---
+- name: Set etcd download facts
+  ansible.builtin.set_fact:
+    etcd_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64', 'ppc64le': 'ppc64le', 's390x': 's390x'}[ansible_facts['architecture']] }}"
+
+- name: Set etcd release name
+  ansible.builtin.set_fact:
+    etcd_release: "etcd-{{ etcd_version }}-linux-{{ etcd_arch }}"
+
+- name: Create etcd system user
+  ansible.builtin.user:
+    name: etcd
+    system: true
+    shell: /sbin/nologin
+    home: "{{ etcd_data_dir }}"
+    create_home: false
+
+- name: Create etcd directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: etcd
+    group: etcd
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/etcd, mode: "0750" }
+    - { path: "{{ etcd_data_dir }}", mode: "0700" }
+
+# etcd อ่าน key ได้เฉพาะไฟล์ที่ตัวเองเป็นเจ้าของ → สำเนาจาก node.key (role tls)
+- name: Copy the node key for etcd (owner etcd, 0600)
+  ansible.builtin.copy:
+    src: "{{ tls_node_key }}"
+    dest: "{{ tls_etcd_key }}"
+    remote_src: true
+    owner: etcd
+    group: etcd
+    mode: "0600"
+  when:
+    - tls_enabled | bool
+    - not ansible_check_mode or tls_key_stat.stat.exists | default(false)
+
+- name: Check installed etcd version
+  ansible.builtin.command: /usr/local/bin/etcd --version
+  register: etcd_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# etcd อัปเกรดได้ทีละ minor (เช่น 3.6.x → 3.7.x ต้องมาจาก >= 3.6.11)
+- name: Guard etcd upgrade path (one minor version at a time)
+  vars:
+    etcd_current: "{{ etcd_installed.stdout | default('') | regex_search('etcd Version: ([0-9.]+)', '\\1') | default([''], true) | first }}"
+    etcd_target: "{{ etcd_version | regex_replace('^v', '') }}"
+  ansible.builtin.assert:
+    that:
+      - (etcd_target.split('.')[1] | int) - (etcd_current.split('.')[1] | int) <= 1
+      - etcd_target is version(etcd_current, '>=')
+    fail_msg: >-
+      Cannot go from etcd {{ etcd_current }} to {{ etcd_target }} directly.
+      Upgrade one minor version at a time (3.6 must be >= 3.6.11 before 3.7) and take a snapshot first.
+    quiet: true
+  when: etcd_current | length > 0
+
+- name: Install etcd binaries
+  when: etcd_version | regex_replace('^v', '') not in (etcd_installed.stdout | default(''))
+  block:
+    - name: Download etcd release (verified with SHA256SUMS)
+      ansible.builtin.get_url:
+        url: "https://github.com/etcd-io/etcd/releases/download/{{ etcd_version }}/{{ etcd_release }}.tar.gz"
+        dest: "/tmp/{{ etcd_release }}.tar.gz"
+        checksum: "sha256:https://github.com/etcd-io/etcd/releases/download/{{ etcd_version }}/SHA256SUMS"
+        mode: "0644"
+      when: etcd_tarball_local_path | length == 0
+
+    - name: Copy etcd tarball from control node (air-gapped mode)
+      ansible.builtin.copy:
+        src: "{{ etcd_tarball_local_path }}"
+        dest: "/tmp/{{ etcd_release }}.tar.gz"
+        mode: "0644"
+      when: etcd_tarball_local_path | length > 0
+
+    - name: Extract etcd
+      ansible.builtin.unarchive:
+        src: "/tmp/{{ etcd_release }}.tar.gz"
+        dest: /tmp
+        remote_src: true
+
+    - name: Install etcd, etcdctl, etcdutl to /usr/local/bin
+      ansible.builtin.copy:
+        src: "/tmp/{{ etcd_release }}/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      loop: [etcd, etcdctl, etcdutl]
+      notify: Restart etcd
+
+- name: Write etcd config
+  ansible.builtin.template:
+    src: etcd.conf.yml.j2
+    dest: /etc/etcd/etcd.conf.yml
+    owner: etcd
+    group: etcd
+    mode: "0640"
+  notify: Restart etcd
+
+- name: Shell helper so `etcdctl endpoint health` works without --endpoints
+  ansible.builtin.copy:
+    dest: /etc/profile.d/etcd.sh
+    mode: "0644"
+    content: |
+      # Ansible managed (roles/etcd) — แก้ที่ project แทนการแก้ไฟล์นี้
+      export ETCDCTL_ENDPOINTS={{ etcd_endpoints }}
+      {% if etcd_client_scheme == 'https' %}
+      # client cert ของ node อ่านได้เฉพาะ root → ใช้ ectl (sudo) หรือรันในฐานะ root
+      export ETCDCTL_CACERT={{ tls_ca_cert }}
+      export ETCDCTL_CERT={{ tls_node_cert }}
+      export ETCDCTL_KEY={{ tls_node_key }}
+      {% endif %}
+      # ectl member list -w table | ectl endpoint health --cluster -w table
+      alias ectl='sudo /usr/local/bin/etcdctl --endpoints={{ etcd_endpoints }} {{ etcdctl_tls_args | join(' ') }}'
+
+- name: Write etcd systemd unit
+  ansible.builtin.template:
+    src: etcd.service.j2
+    dest: /etc/systemd/system/etcd.service
+    mode: "0644"
+  notify: Restart etcd
+
+# start พร้อมกันทุก node (no_block) เพราะ etcd ต้องการ quorum ก่อนจะส่ง READY ให้ systemd
+- name: Start etcd on all members simultaneously
+  ansible.builtin.systemd_service:
+    name: etcd
+    state: started
+    enabled: true
+    daemon_reload: true
+    no_block: true
+
+- name: Flush handlers (apply etcd restarts before health check)
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for etcd cluster to become healthy
+  ansible.builtin.command:
+    argv: "{{ ['/usr/local/bin/etcdctl', '--endpoints=' ~ etcd_endpoints] + etcdctl_tls_args + ['endpoint', 'health'] }}"
+  environment:
+    ETCDCTL_API: "3"
+  register: etcd_health
+  until: etcd_health.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+  run_once: true

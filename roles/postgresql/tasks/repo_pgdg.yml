@@ -1,0 +1,56 @@
+---
+# ใช้ PostgreSQL จาก PGDG (download.postgresql.org) — รองรับ EL8 / EL9 / EL10
+- name: Import PGDG GPG key(s)
+  ansible.builtin.rpm_key:
+    key: "{{ item }}"
+    state: present
+  loop: "{{ pgdg_gpg_key_urls }}"
+
+- name: Check whether PGDG repo is already installed
+  ansible.builtin.stat:
+    path: /etc/yum.repos.d/pgdg-redhat-all.repo
+  register: postgresql_pgdg_repo
+
+- name: Install PGDG repository RPM (EL-{{ el_major }})
+  ansible.builtin.dnf:
+    name: "{{ pgdg_repo_rpm_url }}"
+    state: present
+  when: not postgresql_pgdg_repo.stat.exists
+
+- name: Tune the PGDG repo file
+  when: postgresql_pgdg_repo.stat.exists or not ansible_check_mode
+  block:
+    # EL10: Rocky/Oracle ไม่มีค่า $releasever_minor ทำให้ baseurl กลายเป็น "rhel-10.-x86_64" (404)
+    - name: Pin PGDG baseurl to the EL major version {{ el_major }}
+      ansible.builtin.replace:
+        path: /etc/yum.repos.d/pgdg-redhat-all.repo
+        regexp: 'rhel-[^/]*-\$basearch'
+        replace: "rhel-{{ el_major }}-$basearch"
+      when: pgdg_pin_major_baseurl | bool
+
+    # AppStream ของ EL10 มีแพ็กเกจชื่อ postgresqlNN ซ้ำกับ PGDG — priority ทำให้ dnf เลือกของ PGDG เสมอ
+    # (ไม่ต้องแก้ไฟล์ repo ของ OS ซึ่งบน RHEL ถูก subscription-manager เขียนทับได้)
+    - name: Prefer PGDG over the OS repositories for same-name packages
+      ansible.builtin.replace:
+        path: /etc/yum.repos.d/pgdg-redhat-all.repo
+        regexp: '^(\[pgdg[^\]]*\])\n(?!priority=)'
+        replace: '\1\npriority={{ pgdg_repo_priority }}\n'
+
+# EL8/EL9: ต้อง disable module postgresql ของ AppStream ก่อนติดตั้งแพ็กเกจ PGDG (ตามเอกสาร PGDG)
+- name: Disable the AppStream postgresql module (EL8/EL9)
+  when: el_major | int < 10
+  block:
+    - name: Read postgresql module state
+      ansible.builtin.command: dnf -q module list postgresql
+      register: postgresql_modules
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Disable postgresql module so dnf uses the PGDG packages
+      ansible.builtin.command: dnf -qy module disable postgresql
+      when:
+        - postgresql_modules.rc == 0
+        - "postgresql_modules.stdout is search('(?m)^postgresql\\s')"
+        - "postgresql_modules.stdout is not search('(?m)^postgresql\\s+\\S+\\s+(\\[[a-z]\\])*\\[x\\]')"
+      changed_when: true

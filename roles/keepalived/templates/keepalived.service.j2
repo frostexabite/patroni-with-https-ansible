@@ -1,0 +1,18 @@
+# {{ ansible_managed }}
+# Based on upstream keepalived/keepalived.service.in (keepalived {{ keepalived_version }})
+[Unit]
+Description=LVS and VRRP High Availability Monitor
+Documentation=man:keepalived(8) man:keepalived.conf(5) https://keepalived.org
+After=network-online.target syslog.target haproxy.service
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/run/keepalived.pid
+KillMode=process
+EnvironmentFile=-/etc/sysconfig/keepalived
+ExecStart={{ keepalived_bin }} -D $KEEPALIVED_OPTIONS
+ExecReload=/bin/kill -HUP $MAINPID
+
+[Install]
+WantedBy=multi-user.target

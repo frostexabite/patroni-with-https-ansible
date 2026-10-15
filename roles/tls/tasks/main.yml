@@ -1,0 +1,20 @@
+---
+# =====================================================================
+#  TLS ด้วย CA ของ cluster เอง
+#    guard.yml : ห้าม site.yml สลับ http ↔ https บน cluster ที่รันอยู่ (ต้องใช้ playbooks/enable-tls.yml)
+#    ca.yml    : สร้าง CA ครั้งแรกบน control node (<inventory>/pki) — ไม่สร้างซ้ำถ้า node เชื่อ CA เดิมอยู่แล้ว
+#    node.yml  : private key สร้างบน node (ไม่ออกจากเครื่อง) → CSR → control node เซ็น → ติดตั้ง cert
+#                ต่ออายุให้อัตโนมัติเมื่อเหลือน้อยกว่า tls_cert_renew_days วัน
+# =====================================================================
+- name: Guard against switching http/https on a running cluster
+  ansible.builtin.import_tasks: guard.yml
+  tags: [always]
+
+- name: Cluster CA and node certificates
+  when: tls_enabled | bool
+  block:
+    - name: Cluster CA (control node)
+      ansible.builtin.import_tasks: ca.yml
+
+    - name: Node key, CSR and signed certificate
+      ansible.builtin.import_tasks: node.yml

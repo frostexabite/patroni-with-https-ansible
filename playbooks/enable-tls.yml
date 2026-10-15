@@ -1,0 +1,259 @@
+---
+# =====================================================================
+#  เปิด TLS บน cluster ที่ deploy แบบ http ไปแล้ว — etcd ไม่เสีย quorum, PostgreSQL ไม่ restart
+#    ansible-playbook playbooks/enable-tls.yml --ask-vault-pass
+#
+#  รันซ้ำได้: ทุกขั้นดูสถานะจริงก่อน (เช่น peer URL ใน etcd) แล้วข้ามขั้นที่ทำไปแล้ว
+#  ถ้าหยุดกลางทาง ให้แก้สาเหตุแล้วรันคำสั่งเดิมอีกครั้ง
+#
+#  1) CA + cert ของทุก node                                            (ไม่กระทบระบบ)
+#  2) etcd "dual1": client รับ http+https | peer เปิด https ที่ port ชั่วคราว (2381)
+#     restart ทีละ node แล้วย้าย peer URL ของแต่ละ member → https://<ip>:2381
+#  3) etcd "dual2": peer เปิด https ที่ 2380 แทน http → ย้าย peer URL → https://<ip>:2380
+#  4) PostgreSQL ssl=on ด้วย reload ก่อน → Patroni pause → patroni.yml ใหม่ (etcd https, REST API https,
+#     sslmode=verify-full ภายใน) → restart Patroni พร้อมกัน (PostgreSQL ไม่ถูก restart)
+#     → reload HAProxy (health check https) ทันที
+#  5) etcd "final": ปิด http (restart ทีละ node) → Patroni resume → ปิด port ชั่วคราว → verify
+#
+#  ผลกระทบ: ช่วงขั้นที่ 4 HAProxy อาจมองไม่เห็น primary ไม่กี่วินาที (Patroni restart)
+#  แนะนำทำในช่วง maintenance window — app ยังต่อแบบไม่ใช้ SSL ได้จนกว่าจะตั้ง tls_postgres_enforce: true
+# =====================================================================
+- name: Detect target OS
+  ansible.builtin.import_playbook: detect_os.yml
+
+- name: Enable TLS on a running cluster
+  hosts: pg_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  vars:
+    tls_migration: true                       # ข้าม guard ใน roles/tls (ตั้งใจเปลี่ยน scheme)
+    etl_patronictl: "{{ patroni_venv }}/bin/patronictl -c {{ patroni_config_file }}"
+    etl_etcd_base: >-
+      {{ ['/usr/local/bin/etcdctl', '--dial-timeout=3s', '--command-timeout=10s',
+          '--cacert=' ~ tls_ca_cert, '--cert=' ~ tls_node_cert, '--key=' ~ tls_node_key] }}
+    etl_etcdctl: "{{ etl_etcd_base + ['--endpoints=https://' ~ node_ip ~ ':' ~ etcd_client_port] }}"
+    etl_etcdctl_all: >-
+      {{ etl_etcd_base + ['--endpoints=' ~ (groups['pg_cluster'] | map('extract', hostvars, 'node_ip')
+         | map('regex_replace', '^', 'https://') | map('regex_replace', '$', ':' ~ etcd_client_port) | join(','))] }}
+
+  tasks:
+    # ------------------------------------------------------------ 0) ตรวจก่อนเริ่ม
+    - name: TLS must be enabled in group_vars (tls_enabled true)
+      ansible.builtin.assert:
+        that: tls_enabled | bool
+        fail_msg: "Set tls_enabled: true in inventory/group_vars/all/main.yml first."
+        quiet: true
+
+    - name: Gather service states
+      ansible.builtin.service_facts:
+
+    - name: Etcd and Patroni must be running on every node
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['etcd.service'].state | default('') == 'running'
+          - ansible_facts.services['patroni.service'].state | default('') == 'running'
+        fail_msg: >-
+          etcd / patroni is not running on {{ inventory_hostname }}. This playbook converts a healthy running
+          cluster; for a new cluster just run site.yml.
+        quiet: true
+
+    # ------------------------------------------------------------ 1) CA + cert
+    - name: Step 1 - CA and node certificates
+      ansible.builtin.include_role:
+        name: tls
+
+    # ------------------------------------------------------------ 2-3) etcd peer → https
+    - name: Read etcd membership (http or https, whichever answers)
+      ansible.builtin.shell:
+        cmd: >-
+          {{ etl_etcdctl | join(' ') }} member list -w json 2>/dev/null ||
+          /usr/local/bin/etcdctl --dial-timeout=3s --endpoints=http://{{ node_ip }}:{{ etcd_client_port }} member list -w json
+      register: etl_members_raw
+      changed_when: false
+      run_once: true
+
+    - name: Work out which etcd peer stages are still needed
+      vars:
+        etl_peer_urls: "{{ (etl_members_raw.stdout | from_json).members | map(attribute='peerURLs') | flatten }}"
+      ansible.builtin.set_fact:
+        etl_need_dual1: "{{ etl_peer_urls | select('match', '^http://') | list | length > 0 }}"
+        etl_need_dual2: "{{ etl_peer_urls | reject('match', '^https://.*:' ~ etcd_peer_port ~ '$') | list | length > 0 }}"
+      run_once: true
+
+    - name: Show the plan
+      ansible.builtin.debug:
+        msg: >-
+          etcd peer URLs: {{ (etl_members_raw.stdout | from_json).members | map(attribute='peerURLs') | flatten | join(', ') }}
+          | move to https via temporary port: {{ etl_need_dual1 }} | move back to {{ etcd_peer_port }}: {{ etl_need_dual2 }}
+      run_once: true
+
+    - name: Open the temporary etcd peer port inside the cluster subnet
+      ansible.posix.firewalld:
+        rich_rule: >-
+          rule family="ipv4" source address="{{ cluster_network_cidr }}"
+          port port="{{ etcd_peer_port_tmp }}" protocol="tcp" accept
+        permanent: false
+        immediate: true
+        state: enabled
+      when: firewall_enabled | bool and etl_need_dual2 | bool
+
+    - name: Step 2 - etcd dual1 (client http+https, peer http + https on the temporary port)
+      when: etl_need_dual1 | bool
+      block:
+        - name: Roll etcd config dual1 (one node at a time)
+          ansible.builtin.include_role:
+            name: etcd
+          vars:
+            etcd_tls_stage: dual1
+
+        - name: Move every member's peer URL to https on the temporary port
+          ansible.builtin.include_tasks: tasks/etcd-peer-move.yml
+          vars:
+            etl_target_port: "{{ etcd_peer_port_tmp }}"
+
+    - name: Step 3 - etcd dual2 (peer https on the temporary port + https on the normal port)
+      when: etl_need_dual2 | bool
+      block:
+        - name: Roll etcd config dual2 (one node at a time)
+          ansible.builtin.include_role:
+            name: etcd
+          vars:
+            etcd_tls_stage: dual2
+
+        - name: Move every member's peer URL back to https on the normal peer port
+          ansible.builtin.include_tasks: tasks/etcd-peer-move.yml
+          vars:
+            etl_target_port: "{{ etcd_peer_port }}"
+
+    # ------------------------------------------------------------ 4a) PostgreSQL ssl=on ก่อน
+    # config สุดท้ายให้ Patroni ต่อ PostgreSQL ด้วย sslmode=verify-full — ถ้า PostgreSQL ยังไม่เปิด ssl
+    # Patroni ที่ restart จะต่อ PostgreSQL ไม่ได้และหยุดทำงาน จึงเปิด ssl ด้วย reload ก่อน
+    - name: Read the current patroni.yml
+      ansible.builtin.slurp:
+        src: "{{ patroni_config_file }}"
+      register: etl_patroni_now
+
+    - name: Step 4a - turn on SSL in PostgreSQL first (REST API / etcd / internal sslmode unchanged)
+      when: "(etl_patroni_now.content | b64decode) is not search('(?m)^\\s+certfile:')"
+      block:
+        - name: Write patroni.yml with PostgreSQL SSL parameters only
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/patroni/templates/patroni.yml.j2"
+            dest: "{{ patroni_config_file }}"
+            owner: postgres
+            group: postgres
+            mode: "0600"
+          vars:
+            patroni_tls_stage: pg_ssl
+          register: etl_pg_ssl_conf
+
+        - name: Reload Patroni (applies ssl=on to PostgreSQL without a restart)
+          ansible.builtin.systemd_service:
+            name: patroni
+            state: reloaded
+          when: etl_pg_ssl_conf is changed  # noqa: no-handler
+
+    - name: Wait until PostgreSQL reports ssl = on
+      ansible.builtin.command:
+        argv: ["{{ pg_bin_dir }}/psql", -h, "{{ pg_local_parameters.unix_socket_directories }}", -p, "{{ pg_port }}",
+               -d, postgres, -Atc, "show ssl"]
+      become: true
+      become_user: postgres
+      register: etl_ssl_on
+      until: etl_ssl_on.stdout | default('') == 'on'
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    # ------------------------------------------------------------ 4b) Patroni + HAProxy
+    # patronictl ยังใช้ patroni.yml เดิม (etcd http) ได้ เพราะ etcd ยังรับ http อยู่จนถึงขั้นที่ 5
+    - name: Step 4b - pause Patroni (PostgreSQL keeps running, no failover while we restart daemons)
+      ansible.builtin.command: "{{ etl_patronictl }} pause --wait"
+      register: etl_pause
+      changed_when: "'already' not in etl_pause.stdout + etl_pause.stderr"
+      failed_when: etl_pause.rc != 0 and 'already' not in (etl_pause.stdout + etl_pause.stderr)
+      run_once: true
+
+    - name: Write patroni.yml with TLS (etcd https, REST API https, PostgreSQL ssl)
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/patroni/templates/patroni.yml.j2"
+        dest: "{{ patroni_config_file }}"
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      register: etl_patroni_conf
+
+    - name: Record the DCS connection settings
+      ansible.builtin.include_role:
+        name: patroni
+        tasks_from: dcs_marker.yml
+
+    # เขียน haproxy.cfg (check-ssl) ไว้ก่อน แต่ยังไม่ reload — reload ทันทีหลัง Patroni เปลี่ยนเป็น https
+    - name: Prepare HAProxy config with https health checks
+      ansible.builtin.include_role:
+        name: haproxy
+        tasks_from: config.yml
+
+    - name: Restart Patroni daemons together (cluster is paused, PostgreSQL is not restarted)
+      ansible.builtin.systemd_service:
+        name: patroni
+        state: restarted
+      when: etl_patroni_conf is changed  # noqa: no-handler (ต้องเกิดตรงนี้ ก่อน reload HAProxy)
+
+    - name: Reload HAProxy now (health checks switch to https)
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait until every Patroni REST API answers over https
+      ansible.builtin.uri:
+        url: "https://{{ node_ip }}:{{ patroni_restapi_port }}/patroni"
+        ca_path: "{{ tls_ca_cert }}"
+      register: etl_api
+      until: etl_api.status == 200
+      retries: 30
+      delay: 2
+
+    - name: Wait until the cluster has a leader again
+      ansible.builtin.uri:
+        url: "https://{{ node_ip }}:{{ patroni_restapi_port }}/cluster"
+        ca_path: "{{ tls_ca_cert }}"
+        return_content: true
+      register: etl_cluster
+      until: >-
+        etl_cluster.json is defined and
+        (etl_cluster.json.members | default([]) | selectattr('role', 'equalto', 'leader') | list | length) == 1
+      retries: 30
+      delay: 2
+      run_once: true
+
+    # ------------------------------------------------------------ 5) etcd https เท่านั้น
+    - name: Step 5 - etcd final (https only, advertise https)
+      ansible.builtin.include_role:
+        name: etcd
+      vars:
+        etcd_tls_stage: final
+
+    - name: Resume Patroni
+      ansible.builtin.command: "{{ etl_patronictl }} resume --wait"
+      changed_when: true
+      run_once: true
+
+    - name: Close the temporary etcd peer port
+      ansible.posix.firewalld:
+        rich_rule: >-
+          rule family="ipv4" source address="{{ cluster_network_cidr }}"
+          port port="{{ etcd_peer_port_tmp }}" protocol="tcp" accept
+        permanent: false
+        immediate: true
+        state: disabled
+      when: firewall_enabled | bool
+
+    - name: Next steps
+      ansible.builtin.debug:
+        msg:
+          - "TLS is on. Give applications {{ tls_pki_dir }}/ca.crt and connect with sslmode=verify-full."
+          - "When every application uses SSL: set tls_postgres_enforce: true and run: ansible-playbook site.yml --tags patroni"
+          - "Commit inventory/pki/ (ca.key is encrypted) so the CA is not lost."
+      run_once: true
+
+- name: Verify cluster
+  ansible.builtin.import_playbook: verify.yml

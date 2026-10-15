@@ -1,0 +1,37 @@
+---
+# แยกไว้ให้ playbooks/enable-tls.yml เรียกใช้ได้ (เปลี่ยน health check เป็น https ทันทีหลัง Patroni)
+# หน้า stats ใช้ cert ของ node: HAProxy ต้องการ cert + key ในไฟล์เดียว (อ่านตอน start/reload ในฐานะ root)
+- name: Read the node certificate and key for the stats page
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - "{{ tls_node_cert }}"
+    - "{{ tls_node_key }}"
+  register: haproxy_tls_parts
+  no_log: true
+  failed_when: false
+  check_mode: false
+  when: tls_enabled | bool
+
+- name: Write the stats page certificate bundle (certificate + key)
+  ansible.builtin.copy:
+    dest: "{{ tls_haproxy_pem }}"
+    content: "{{ haproxy_tls_parts.results | map(attribute='content') | map('b64decode') | map('trim') | join('\n') }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when:
+    - tls_enabled | bool
+    - haproxy_tls_parts.results | selectattr('content', 'defined') | list | length == 2
+  notify: Reload haproxy
+
+- name: Write haproxy.cfg
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: haproxy
+    mode: "0640"
+    validate: "{{ haproxy_bin }} -c -f %s"
+  notify: Reload haproxy

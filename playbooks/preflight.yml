@@ -1,0 +1,362 @@
+---
+# =====================================================================
+#  Pre-flight checks — อ่านอย่างเดียว ไม่แก้ไขอะไรบนเครื่อง
+#  site.yml เรียกให้อัตโนมัติก่อนติดตั้ง หรือรันเดี่ยว ๆ ได้:
+#    ansible-playbook playbooks/preflight.yml --ask-vault-pass
+#  ข้ามได้ด้วย: --skip-tags preflight (ยกเว้น detect OS ซึ่งรันเสมอ)
+#
+#  1) ตรวจค่าที่ใส่ใน inventory/hosts.yml บน control node (ยังไม่ SSH)
+#  2) detect OS + เลือก Python ของระบบ (playbooks/detect_os.yml)
+#  3) ตรวจบนแต่ละ node: IP, repo, VIP, internet, เวลา
+# =====================================================================
+- name: Validate site settings in inventory/hosts.yml (control node, no SSH)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  check_mode: false
+  tags: [preflight, always]
+  vars:
+    # inventory ตั้ง ansible_become: true ให้ทุก host — ตัวแปรชนะ keyword become: false จึงต้องปิดด้วยตัวแปร
+    # (control node ไม่ต้องใช้ sudo และ user ที่รัน Ansible อาจ sudo ไม่ได้แบบไม่ถามรหัส)
+    ansible_become: false
+    pf_hosts: "{{ groups['pg_cluster'] | default([]) }}"
+    pf_first: "{{ pf_hosts[0] | default('') }}"
+    pf_fix_hint: >-
+      Fix inventory/hosts.yml by hand, or re-enter the values with: python3 scripts/setup-inventory.py
+    pf_validate_script: |
+      import ipaddress, json, re, sys
+      d = json.loads(sys.argv[1])
+      err = []
+      host_re = re.compile(r'^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$')
+      def is_set(label, v):
+          if v is None or str(v).strip() == '' or '<' in str(v):
+              err.append('%s is not filled in (value: %r)' % (label, v))
+              return False
+          return True
+      def ip4(label, v):
+          if not is_set(label, v):
+              return None
+          try:
+              return ipaddress.IPv4Address(str(v).strip())
+          except ValueError:
+              err.append('%s: %r is not an IPv4 address' % (label, v))
+      def net4(label, v):
+          if not is_set(label, v):
+              return None
+          try:
+              return ipaddress.IPv4Network(str(v).strip(), strict=False)
+          except ValueError:
+              err.append('%s: %r is not an IPv4 CIDR such as 10.0.0.0/24' % (label, v))
+      def edge(net, a):
+          return net.prefixlen <= 30 and a in (net.network_address, net.broadcast_address)
+      net = net4('cluster_network_cidr', d['cidr'])
+      apps = d['app_cidrs'] if isinstance(d['app_cidrs'], list) else [d['app_cidrs']]
+      if not apps:
+          err.append('app_allowed_cidrs is empty')
+      for c in apps:
+          net4('app_allowed_cidrs entry', c)
+      seen = {}
+      for name, v in d['nodes']:
+          if not host_re.match(name):
+              err.append("host %r: use only a-z, 0-9 and '-' (it becomes the OS hostname and etcd member name)" % name)
+          a = ip4('host %r ansible_host' % name, v)
+          if a is None:
+              continue
+          if a in seen:
+              err.append('host %r: IP %s is already used by %r' % (name, a, seen[a]))
+          seen[a] = name
+          if net is not None and a not in net:
+              err.append('host %r: %s is outside cluster_network_cidr %s' % (name, a, net))
+          elif net is not None and edge(net, a):
+              err.append('host %r: %s is the network/broadcast address of %s' % (name, a, net))
+      if str(d['vip_enabled']).lower() in ('true', '1', 'yes'):
+          vip = ip4('keepalived_vip', d['vip'])
+          if vip is not None:
+              if vip in seen:
+                  err.append('keepalived_vip %s is already the IP of %r - pick a free address' % (vip, seen[vip]))
+              if net is not None and vip not in net:
+                  err.append('keepalived_vip %s is outside cluster_network_cidr %s' % (vip, net))
+              elif net is not None and edge(net, vip):
+                  err.append('keepalived_vip %s is the network/broadcast address of %s' % (vip, net))
+          try:
+              ok = 1 <= int(str(d['vip_prefix'])) <= 32
+          except ValueError:
+              ok = False
+          if not ok:
+              err.append('keepalived_vip_prefix %r must be a number 1-32' % (d['vip_prefix'],))
+          try:
+              ok = 1 <= int(str(d['router_id'])) <= 255
+          except ValueError:
+              ok = False
+          if not ok:
+              err.append('keepalived_router_id %r must be a number 1-255' % (d['router_id'],))
+      if err:
+          print('; '.join(err))
+          sys.exit(1)
+      print('OK: %d nodes (%s) inside %s%s' % (len(seen), ', '.join(str(a) for a in seen), net,
+            ', VIP %s' % d['vip'] if str(d['vip_enabled']).lower() in ('true', '1', 'yes') else ''))
+
+  tasks:
+    - name: Require an odd number of nodes (etcd quorum), minimum 3
+      ansible.builtin.assert:
+        that:
+          - pf_hosts | length >= 3
+          - pf_hosts | length is odd
+        fail_msg: >-
+          pg_cluster in inventory/hosts.yml must contain an odd number of hosts (>= 3) for etcd quorum
+          (found {{ pf_hosts | length }}). {{ pf_fix_hint }}
+        quiet: true
+
+    - name: Validate node IPs, subnets and VIP entered in inventory/hosts.yml
+      ansible.builtin.command:
+        argv: ["{{ ansible_playbook_python }}", "-c", "{{ pf_validate_script }}", "{{ pf_input | to_json }}"]
+      vars:
+        pf_input:
+          nodes: "{{ pf_hosts | zip(pf_hosts | map('extract', hostvars, 'node_ip')) | list }}"
+          cidr: "{{ hostvars[pf_first]['cluster_network_cidr'] | default('') }}"
+          app_cidrs: "{{ hostvars[pf_first]['app_allowed_cidrs'] | default([]) }}"
+          vip_enabled: "{{ hostvars[pf_first]['keepalived_on'] | bool }}"
+          vip: "{{ hostvars[pf_first]['keepalived_vip'] | default('') }}"
+          vip_prefix: "{{ hostvars[pf_first]['keepalived_vip_prefix'] | default('') }}"
+          router_id: "{{ hostvars[pf_first]['keepalived_vrid'] }}"
+      register: pf_validate
+      changed_when: false
+      failed_when: false
+
+    - name: Fail when the site settings are missing or invalid
+      ansible.builtin.assert:
+        that: pf_validate.rc == 0
+        fail_msg: "{{ pf_validate.stdout | default(pf_validate.msg | default('validation failed')) }} — {{ pf_fix_hint }}"
+        success_msg: "{{ pf_validate.stdout }}"
+
+    - name: Require secrets from inventory/group_vars/all/vault.yml
+      ansible.builtin.assert:
+        that:
+          - hostvars[pf_first]['vault_pg_superuser_password'] is defined
+          - hostvars[pf_first]['vault_pg_replication_password'] is defined
+          - hostvars[pf_first]['vault_pg_rewind_password'] is defined
+          - hostvars[pf_first]['vault_patroni_restapi_password'] is defined
+          - hostvars[pf_first]['vault_haproxy_stats_password'] is defined
+          - hostvars[pf_first]['vault_keepalived_auth_pass'] is defined or not (hostvars[pf_first]['keepalived_on'] | bool)
+        fail_msg: >-
+          Missing secrets. Copy inventory/group_vars/all/vault.yml.example to vault.yml,
+          set real passwords, run `ansible-vault encrypt` on it, then use --ask-vault-pass.
+        quiet: true
+
+    - name: CA passphrase is required for TLS (vault_tls_ca_passphrase, at least 8 characters)
+      ansible.builtin.assert:
+        that: (hostvars[pf_first]['vault_tls_ca_passphrase'] | default('') | length) >= 8
+        fail_msg: >-
+          tls_enabled is true but vault_tls_ca_passphrase is missing or shorter than 8 characters.
+          Add it to inventory/group_vars/all/vault.yml (ansible-vault edit). It encrypts the cluster CA key
+          in inventory/pki/ca.key — keep it, you need it to renew certificates.
+        quiet: true
+      when: hostvars[pf_first]['tls_enabled'] | bool
+
+    - name: Control node can sign certificates (community.crypto + python cryptography)
+      community.crypto.crypto_info:
+      register: pf_crypto
+      when: hostvars[pf_first]['tls_enabled'] | bool
+
+    - name: Require python cryptography on the control node
+      ansible.builtin.assert:
+        that: pf_crypto.python_cryptography_installed | default(false)
+        fail_msg: >-
+          The Python running Ansible ({{ ansible_playbook_python }}) has no "cryptography" module, which roles/tls
+          needs to sign node certificates. Run: pip install cryptography   (inside the Ansible venv)
+        success_msg: "cryptography {{ pf_crypto.python_cryptography_capabilities.version | default('?') }} on the control node"
+      when: hostvars[pf_first]['tls_enabled'] | bool
+
+    - name: VRRP password must be at most 8 characters
+      ansible.builtin.assert:
+        that: hostvars[pf_first]['vault_keepalived_auth_pass'] | length <= 8
+        fail_msg: "vault_keepalived_auth_pass is longer than 8 characters (VRRP PASS limit)."
+        quiet: true
+      when: hostvars[pf_first]['keepalived_on'] | bool
+
+- name: Detect target OS
+  ansible.builtin.import_playbook: detect_os.yml
+
+- name: Pre-flight checks on each node
+  hosts: pg_cluster
+  gather_facts: true
+  any_errors_fatal: true
+  check_mode: false            # ทุก task ในนี้อ่านอย่างเดียว จึงรันจริงได้แม้อยู่ใน --check
+  tags: [preflight, always]
+  vars:
+    preflight_os_packages: >-
+      {{ patroni_python_packages
+         + (pg_packages if (pg_install_source_effective == 'appstream' and (el_major | int) >= 10) else []) }}
+
+  tasks:
+    # ---------------- network ----------------
+    - name: Node IP (ansible_host) must be configured on the node itself
+      ansible.builtin.assert:
+        that: node_ip in ansible_facts['all_ipv4_addresses']
+        fail_msg: >-
+          {{ node_ip }} is not an address of {{ inventory_hostname }}
+          (it has {{ ansible_facts['all_ipv4_addresses'] | join(', ') }}).
+          Set ansible_host to the node's cluster-network IP in inventory/hosts.yml.
+        quiet: true
+
+    - name: VIP interface must exist on the node
+      ansible.builtin.assert:
+        that: keepalived_iface | length > 0 and keepalived_iface in ansible_facts['interfaces']
+        fail_msg: >-
+          keepalived interface "{{ keepalived_iface }}" not found on {{ inventory_hostname }}
+          (has {{ ansible_facts['interfaces'] | join(', ') }}). Set keepalived_interface in inventory/hosts.yml.
+        quiet: true
+      when: keepalived_on | bool
+
+    # ---------------- OS repositories ----------------
+    - name: Ask dnf whether the enabled repositories provide the OS packages this node needs
+      ansible.builtin.command:
+        argv: "{{ ['dnf', '-q', 'repoquery', '--qf', '%{name} '] + preflight_os_packages }}"
+      register: preflight_repoquery
+      changed_when: false
+      failed_when: false
+      when: preflight_check_repos | bool
+
+    - name: Fail when a required OS package is not available
+      vars:
+        preflight_missing: "{{ preflight_os_packages | reject('in', preflight_repoquery.stdout | default('') | split) | list }}"
+      ansible.builtin.assert:
+        that: preflight_missing | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }} ({{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}):
+          enabled repositories do not provide {{ preflight_missing | join(', ') }}.
+          {{ preflight_repoquery.stderr | default('') | trim }}
+          RHEL: register the system (subscription-manager register) and enable BaseOS + AppStream.
+          python3.12 needs EL 8.10 / 9.4 or newer (dnf upgrade), or point patroni_python_by_major at python3.11.
+          {{ 'For PostgreSQL set pg_install_source: pgdg.' if pg_install_source_effective == 'appstream' else '' }}
+        quiet: true
+      when: preflight_check_repos | bool
+
+    - name: Read AppStream postgresql module streams (EL8/EL9 appstream mode)
+      ansible.builtin.command: dnf -q module list postgresql
+      register: preflight_pg_modules
+      changed_when: false
+      failed_when: false
+      when:
+        - preflight_check_repos | bool
+        - pg_install_source_effective == 'appstream'
+        - el_major | int < 10
+
+    - name: Fail when AppStream lacks the stream for PostgreSQL {{ pg_version }}
+      ansible.builtin.assert:
+        that: "preflight_pg_modules.stdout is search('(?m)^postgresql\\s+' ~ pg_version ~ '(\\s|$)')"
+        fail_msg: >-
+          AppStream on {{ inventory_hostname }} (EL{{ el_major }}) has no postgresql:{{ pg_version }} module stream.
+          Use pg_install_source: pgdg (or auto), or a pg_version listed by `dnf module list postgresql`.
+        quiet: true
+      when: preflight_pg_modules.stdout is defined
+
+    # ---------------- VIP ----------------
+    - name: VIP must not be one of the node IPs
+      ansible.builtin.assert:
+        that: keepalived_vip not in (groups['pg_cluster'] | map('extract', hostvars, 'node_ip') | list)
+        fail_msg: "keepalived_vip {{ keepalived_vip }} is already a node IP — pick a free address."
+        quiet: true
+      run_once: true
+      when: keepalived_on | bool
+
+    - name: Check whether the VIP already sits on one of our nodes
+      ansible.builtin.command: "ip -brief addr show to {{ keepalived_vip }}"
+      register: preflight_vip_local
+      changed_when: false
+      when: keepalived_on | bool
+
+    - name: Probe the VIP with ARP duplicate-address detection
+      ansible.builtin.command:
+        argv: [arping, -D, -q, -c, "2", -w, "3", -I, "{{ keepalived_iface }}", "{{ keepalived_vip }}"]
+      register: preflight_arping
+      changed_when: false
+      failed_when: false
+      run_once: true
+      when:
+        - keepalived_on | bool
+        - preflight_check_vip_free | bool
+        - >-
+          ansible_play_hosts | map('extract', hostvars, 'preflight_vip_local')
+          | map(attribute='stdout') | select | list | length == 0
+
+    - name: Fail when another machine already answers for the VIP
+      ansible.builtin.assert:
+        that: preflight_arping.rc != 1
+        fail_msg: >-
+          Another device already uses {{ keepalived_vip }} on {{ keepalived_iface }}.
+          Choose a free IP for keepalived_vip in inventory/hosts.yml.
+        success_msg: "VIP {{ keepalived_vip }} is free"
+      run_once: true
+      when: preflight_arping.rc is defined
+
+    # ---------------- outbound downloads ----------------
+    - name: Build the list of download sources this configuration needs
+      ansible.builtin.set_fact:
+        preflight_urls: >-
+          {{ (['https://pypi.org/simple/patroni/'] if 'index-url' not in patroni_pip_extra_args else [])
+             + (['https://download.postgresql.org/pub/repos/yum/'] if pg_install_source_effective == 'pgdg' else [])
+             + (['https://github.com/etcd-io/etcd/releases/download/' ~ etcd_version ~ '/SHA256SUMS']
+                if etcd_tarball_local_path | length == 0 else [])
+             + ([haproxy_download_url ~ '.sha256'] if haproxy_install_method == 'source' else [])
+             + ([keepalived_git_repo ~ '/info/refs?service=git-upload-pack']
+                if (keepalived_on | bool) and keepalived_install_method == 'source' else []) }}
+      when: preflight_check_internet | bool
+
+    - name: Check outbound HTTPS to each download source
+      ansible.builtin.uri:
+        url: "{{ item }}"
+        method: GET
+        timeout: 15
+        follow_redirects: safe
+        return_content: false
+      loop: "{{ preflight_urls | default([]) }}"
+      register: preflight_net
+      failed_when: false
+      when: preflight_check_internet | bool
+
+    - name: Fail when a download source is unreachable
+      ansible.builtin.assert:
+        that: preflight_unreachable | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }} cannot reach: {{ preflight_unreachable | join(', ') }}.
+          Check proxy (/etc/dnf/dnf.conf, environment), firewall or DNS.
+        quiet: true
+      vars:
+        preflight_unreachable: >-
+          {{ preflight_net.results | default([])
+             | rejectattr('skipped', 'defined')
+             | rejectattr('status', 'in', [200, 204, 301, 302, 303, 307, 308])
+             | map(attribute='item') | list }}
+      when: preflight_check_internet | bool
+
+    # ---------------- time ----------------
+    - name: Read NTP sync state
+      ansible.builtin.command: timedatectl show -p NTPSynchronized --value
+      register: preflight_ntp
+      changed_when: false
+      failed_when: false
+
+    - name: Warn when the clock is not NTP-synchronised (etcd/Patroni need sane time)
+      ansible.builtin.debug:
+        msg: "WARNING: {{ inventory_hostname }} clock is not NTP-synchronised yet (chronyd will be enabled by the common role)."
+      when: preflight_ntp.stdout | default('') | trim != 'yes'
+
+    - name: Per-node plan
+      ansible.builtin.debug:
+        msg: >-
+          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} |
+          IP {{ node_ip }}{{ (' | VRRP on ' ~ keepalived_iface) if keepalived_on | bool else '' }} |
+          Patroni Python {{ patroni_python }} |
+          PostgreSQL {{ pg_version }} from {{ pg_install_source_effective }} ({{ pg_bin_dir }})
+
+    - name: Pre-flight summary
+      ansible.builtin.debug:
+        msg:
+          - "Nodes : {{ groups['pg_cluster'] | map('extract', hostvars, 'node_ip') | list | join(', ') }}"
+          - "CIDR  : {{ cluster_network_cidr }}   Apps: {{ app_allowed_cidrs | join(', ') }}"
+          - "VIP   : {{ (keepalived_vip ~ '/' ~ keepalived_vip_prefix ~ ' (VRID ' ~ keepalived_vrid ~ ')') if keepalived_on | bool else 'disabled' }}"
+          - "All pre-flight checks passed."
+      run_once: true

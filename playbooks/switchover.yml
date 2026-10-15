@@ -1,0 +1,53 @@
+---
+# Planned switchover (สำหรับงาน maintenance)
+#   ansible-playbook playbooks/switchover.yml --ask-vault-pass                     # ให้ Patroni เลือก candidate เอง
+#   ansible-playbook playbooks/switchover.yml -e switchover_candidate=pg-node-2      # ระบุ node ใหม่ (ชื่อตาม inventory)
+- name: Patroni planned switchover
+  hosts: pg_cluster[0]
+  gather_facts: false
+  vars:
+    switchover_candidate: ""
+    patronictl: "{{ patroni_venv }}/bin/patronictl -c {{ patroni_config_file }}"
+
+  tasks:
+    - name: Find current leader
+      ansible.builtin.uri:
+        url: "{{ tls_scheme }}://{{ node_ip }}:{{ patroni_restapi_port }}/cluster"
+        ca_path: "{{ tls_ca_cert if tls_enabled | bool else omit }}"
+        return_content: true
+      register: switchover_cluster
+
+    - name: Set leader fact
+      ansible.builtin.set_fact:
+        switchover_leader: >-
+          {{ (switchover_cluster.json.members | selectattr('role', 'equalto', 'leader') | first).name }}
+
+    - name: Switchover
+      ansible.builtin.command: >-
+        {{ patronictl }} switchover {{ cluster_scope }}
+        --leader {{ switchover_leader }}
+        {{ ('--candidate ' ~ switchover_candidate) if switchover_candidate | length > 0 else '' }}
+        --force
+      register: switchover_result
+      changed_when: true
+
+    - name: Wait for new leader
+      ansible.builtin.uri:
+        url: "{{ tls_scheme }}://{{ node_ip }}:{{ patroni_restapi_port }}/cluster"
+        ca_path: "{{ tls_ca_cert if tls_enabled | bool else omit }}"
+        return_content: true
+      register: switchover_after
+      until: >-
+        (switchover_after.json.members | selectattr('role', 'equalto', 'leader') | map(attribute='name') | list | length) == 1 and
+        (switchover_after.json.members | selectattr('role', 'equalto', 'leader') | map(attribute='name') | first) != switchover_leader
+      retries: 30
+      delay: 2
+
+    - name: Show topology
+      ansible.builtin.command: "{{ patronictl }} list"
+      register: switchover_list
+      changed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ switchover_result.stdout_lines + [''] + switchover_list.stdout_lines }}"

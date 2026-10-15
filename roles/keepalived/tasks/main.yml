@@ -1,0 +1,55 @@
+---
+- name: Install keepalived ({{ keepalived_install_method }})
+  ansible.builtin.include_tasks: "install_{{ keepalived_install_method }}.yml"
+
+- name: Validate keepalived auth_pass length (VRRP PASS max 8 chars)
+  ansible.builtin.assert:
+    that: keepalived_auth_pass | length <= 8
+    fail_msg: "keepalived_auth_pass must be at most 8 characters (keepalived silently truncates longer values)."
+    quiet: true
+
+- name: Write keepalived.conf
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: root
+    group: root
+    mode: "0600"
+    validate: "{{ keepalived_bin }} --config-test --use-file=%s"
+  notify: Restart keepalived
+
+- name: Start keepalived
+  ansible.builtin.systemd_service:
+    name: keepalived
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Flush handlers (apply keepalived config before VIP check)
+  ansible.builtin.meta: flush_handlers
+
+- name: Check which node holds the VIP
+  ansible.builtin.command: ip -brief addr show to {{ keepalived_vip }}
+  register: keepalived_vip_check
+  until: keepalived_vip_check.stdout | default('') | length > 0 or inventory_hostname != groups['pg_cluster'][0]
+  retries: 10
+  delay: 2
+  changed_when: false
+
+- name: Report VIP holder
+  ansible.builtin.debug:
+    msg: "VIP {{ keepalived_vip }} is on {{ inventory_hostname }} ({{ keepalived_vip_check.stdout | trim }})"
+  when: keepalived_vip_check.stdout | default('') | length > 0
+
+- name: Report keepalived version
+  ansible.builtin.command: "{{ keepalived_bin }} --version"
+  register: keepalived_running_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Show keepalived version
+  ansible.builtin.debug:
+    msg: >-
+      {{ ((keepalived_running_version.stderr_lines | default([])) + (keepalived_running_version.stdout_lines | default([])))
+         | default(['keepalived not installed yet'], true) | first }}

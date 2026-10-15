@@ -1,0 +1,17 @@
+---
+# PostgreSQL อ่าน ssl_cert_file / ssl_key_file / ssl_ca_file ใหม่ตอน reload (ไม่ต้อง restart)
+# Patroni reload เฉย ๆ ไม่สั่ง PostgreSQL reload ถ้าพารามิเตอร์ไม่เปลี่ยน จึงสั่ง pg_ctl reload เอง
+# (Patroni REST API โหลด cert ใหม่เองตอน "Reload patroni" — handler ของ role patroni)
+# ข้ามถ้า PostgreSQL ยังไม่รัน (ไม่มี postmaster.pid)
+- name: Reload PostgreSQL TLS files
+  ansible.builtin.command:
+    argv: ["{{ pg_bin_dir }}/pg_ctl", reload, -D, "{{ pg_data_dir }}"]
+    removes: "{{ pg_data_dir }}/postmaster.pid"
+  become: true
+  become_user: postgres
+  changed_when: true
+
+# Patroni REST API โหลด cert ใหม่ตอน SIGHUP — เฉพาะถ้า Patroni รันอยู่ (ไม่ start ให้ เพราะจะข้ามลำดับ bootstrap)
+- name: Reload Patroni TLS files
+  ansible.builtin.shell: systemctl is-active --quiet patroni && systemctl reload patroni || true  # noqa: command-instead-of-module
+  changed_when: true

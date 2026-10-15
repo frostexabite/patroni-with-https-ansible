@@ -1,0 +1,174 @@
+---
+# =====================================================================
+#  ตรวจสุขภาพ cluster ทั้งหมด (อ่านอย่างเดียว)
+#    ansible-playbook playbooks/verify.yml --ask-vault-pass
+# =====================================================================
+- name: Detect target OS
+  ansible.builtin.import_playbook: detect_os.yml
+
+- name: Verify PostgreSQL HA cluster
+  hosts: pg_cluster
+  gather_facts: true
+  gather_subset: [min]         # ต้องรู้ EL major เพื่อหา path ของ psql (PGDG / AppStream)
+  check_mode: false            # ทุก task อ่านอย่างเดียว
+  vars:
+    verify_etcd_endpoints: >-
+      {{ groups['pg_cluster'] | map('extract', hostvars, 'node_ip')
+         | map('regex_replace', '^', tls_scheme ~ '://') | map('regex_replace', '$', ':' ~ etcd_client_port) | join(',') }}
+    verify_etcdctl: >-
+      {{ ['/usr/local/bin/etcdctl', '--endpoints=' ~ verify_etcd_endpoints]
+         + (['--cacert=' ~ tls_ca_cert, '--cert=' ~ tls_node_cert, '--key=' ~ tls_node_key] if tls_enabled | bool else []) }}
+    # libpq: verify-full = เข้ารหัส + ตรวจว่า cert ออกโดย CA ของ cluster และชื่อ (VIP/IP) ตรงกับ SAN
+    verify_pg_env: >-
+      {{ {'PGPASSWORD': pg_superuser_password, 'PGCONNECT_TIMEOUT': '5'}
+         | combine({'PGSSLMODE': 'verify-full', 'PGSSLROOTCERT': tls_ca_cert} if tls_enabled | bool else {}) }}
+    verify_target: "{{ keepalived_vip if (keepalived_on | bool) else hostvars[groups['pg_cluster'][0]]['node_ip'] }}"
+    verify_sql: >-
+      select inet_server_addr() || ' recovery=' || pg_is_in_recovery()
+      || ' ssl=' || coalesce((select ssl || ' ' || version from pg_stat_ssl where pid = pg_backend_pid()), 'false')
+
+  tasks:
+    # ---------------- services ----------------
+    - name: Gather service states
+      ansible.builtin.service_facts:
+
+    - name: All services are running
+      vars:
+        verify_services: "{{ ['etcd', 'patroni', 'haproxy'] + (['keepalived'] if keepalived_on | bool else []) }}"
+        verify_not_running: >-
+          {{ verify_services | reject('in', ansible_facts.services | dict2items
+             | selectattr('value.state', 'equalto', 'running') | map(attribute='key')
+             | map('regex_replace', '[.]service$', '') | list) | list }}
+      ansible.builtin.assert:
+        that: verify_not_running | length == 0
+        fail_msg: "Not running on {{ inventory_hostname }}: {{ verify_not_running | join(', ') }}"
+        quiet: true
+
+    # ---------------- etcd ----------------
+    - name: Etcd member list
+      ansible.builtin.command:
+        argv: "{{ verify_etcdctl + ['member', 'list', '-w', 'table'] }}"
+      register: verify_etcd_members
+      changed_when: false
+      run_once: true
+
+    - name: Etcd endpoint health
+      ansible.builtin.command:
+        argv: "{{ verify_etcdctl + ['endpoint', 'health', '--cluster', '-w', 'table'] }}"
+      register: verify_etcd_health
+      changed_when: false
+      run_once: true
+
+    # ---------------- Patroni ----------------
+    - name: Patroni cluster state (REST API)
+      ansible.builtin.uri:
+        url: "{{ tls_scheme }}://{{ node_ip }}:{{ patroni_restapi_port }}/cluster"
+        ca_path: "{{ tls_ca_cert if tls_enabled | bool else omit }}"
+        return_content: true
+      register: verify_cluster
+      run_once: true
+
+    - name: Exactly one leader, every replica streaming, no maintenance mode
+      vars:
+        verify_members: "{{ verify_cluster.json.members }}"
+        verify_leaders: "{{ verify_members | selectattr('role', 'equalto', 'leader') | list }}"
+        verify_replicas: "{{ verify_members | rejectattr('role', 'equalto', 'leader') | list }}"
+      ansible.builtin.assert:
+        that:
+          - verify_leaders | length == 1
+          - verify_members | length == groups['pg_cluster'] | length
+          - verify_replicas | rejectattr('state', 'equalto', 'streaming') | list | length == 0
+          - not (verify_cluster.json.pause | default(false))
+        fail_msg: >-
+          Unhealthy Patroni cluster:
+          {{ verify_members | map(attribute='name') | zip(verify_members | map(attribute='role'), verify_members | map(attribute='state')) | list }}
+          pause={{ verify_cluster.json.pause | default(false) }}
+        success_msg: >-
+          Leader {{ verify_leaders[0].name }}, replicas streaming:
+          {{ verify_replicas | map(attribute='name') | join(', ') }}
+      run_once: true
+
+    - name: Patroni topology
+      ansible.builtin.command: "{{ patroni_venv }}/bin/patronictl -c {{ patroni_config_file }} list"
+      register: verify_patroni_list
+      changed_when: false
+      run_once: true
+
+    # ---------------- HAProxy routing through the VIP ----------------
+    - name: Write port must reach the primary (pg_is_in_recovery = f)
+      ansible.builtin.command:
+        argv: ["{{ pg_bin_dir }}/psql", -h, "{{ verify_target }}", -p, "{{ haproxy_write_port }}",
+               -U, "{{ pg_superuser }}", -d, postgres, -Atc, "{{ verify_sql }}"]
+      environment: "{{ verify_pg_env }}"
+      register: verify_write
+      changed_when: false
+      failed_when: >-
+        verify_write.rc != 0 or 'recovery=false' not in verify_write.stdout or
+        (tls_enabled | bool and 'ssl=true' not in verify_write.stdout)
+      run_once: true
+
+    - name: Read port must reach a replica (pg_is_in_recovery = t)
+      ansible.builtin.command:
+        argv: ["{{ pg_bin_dir }}/psql", -h, "{{ verify_target }}", -p, "{{ haproxy_read_port }}",
+               -U, "{{ pg_superuser }}", -d, postgres, -Atc, "{{ verify_sql }}"]
+      environment: "{{ verify_pg_env }}"
+      register: verify_read
+      changed_when: false
+      failed_when: >-
+        verify_read.rc != 0 or
+        (haproxy_read_check_uri == '/replica' and 'recovery=true' not in verify_read.stdout) or
+        (tls_enabled | bool and 'ssl=true' not in verify_read.stdout)
+      run_once: true
+
+    - name: Replication connections must be encrypted
+      ansible.builtin.command:
+        argv: ["{{ pg_bin_dir }}/psql", -h, "{{ verify_target }}", -p, "{{ haproxy_write_port }}",
+               -U, "{{ pg_superuser }}", -d, postgres, -Atc,
+               "select count(*) filter (where s.ssl) || '/' || count(*) from pg_stat_replication r join pg_stat_ssl s on s.pid = r.pid"]
+      environment: "{{ verify_pg_env }}"
+      register: verify_repl_ssl
+      changed_when: false
+      failed_when: >-
+        verify_repl_ssl.rc != 0 or
+        (verify_repl_ssl.stdout.split('/') | first) != (verify_repl_ssl.stdout.split('/') | last)
+      run_once: true
+      when: tls_enabled | bool
+
+    # ---------------- VIP ----------------
+    - name: Locate VIP
+      ansible.builtin.command: ip -brief addr show to {{ keepalived_vip }}
+      register: verify_vip
+      changed_when: false
+      when: keepalived_on | bool
+
+    - name: VIP is held by exactly one node
+      vars:
+        verify_vip_holders: >-
+          {{ ansible_play_hosts | map('extract', hostvars, 'verify_vip')
+             | selectattr('stdout', 'defined') | selectattr('stdout') | list | length }}
+      ansible.builtin.assert:
+        that: verify_vip_holders | int == 1
+        fail_msg: "VIP {{ keepalived_vip }} is held by {{ verify_vip_holders }} nodes (expected 1)."
+        quiet: true
+      run_once: true
+      when: keepalived_on | bool
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "===== etcd members ====="
+          - "{{ verify_etcd_members.stdout_lines }}"
+          - "===== etcd health ====="
+          - "{{ verify_etcd_health.stdout_lines }}"
+          - "===== patronictl list ====="
+          - "{{ verify_patroni_list.stdout_lines }}"
+          - "Write {{ verify_target }}:{{ haproxy_write_port }} -> {{ verify_write.stdout }}"
+          - "Read  {{ verify_target }}:{{ haproxy_read_port }} -> {{ verify_read.stdout }}"
+          - "Replication over TLS: {{ verify_repl_ssl.stdout | default('n/a (tls_enabled=false)') }}"
+          - "Stats {{ tls_scheme }}://{{ verify_target }}:{{ haproxy_stats_port }}/ (user {{ haproxy_stats_user }})"
+      run_once: true
+
+    - name: VIP holder
+      ansible.builtin.debug:
+        msg: "VIP {{ keepalived_vip }} is held by {{ inventory_hostname }}"
+      when: verify_vip.stdout | default('') | length > 0

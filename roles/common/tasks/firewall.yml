@@ -1,0 +1,73 @@
+---
+# Internal ports: เปิดเฉพาะจาก subnet ของ cluster
+# Client ports  : เปิดให้ subnet ของ application (HAProxy write/read + stats)
+- name: Install firewalld
+  ansible.builtin.dnf:
+    name: firewalld
+    state: "{{ package_state }}"
+
+- name: Start firewalld
+  ansible.builtin.systemd_service:
+    name: firewalld
+    state: started
+    enabled: true
+
+- name: Allow internal cluster ports from cluster subnet
+  ansible.posix.firewalld:
+    rich_rule: >-
+      rule family="ipv4" source address="{{ cluster_network_cidr }}"
+      port port="{{ item }}" protocol="tcp" accept
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ pg_port }}"
+    - "{{ patroni_restapi_port }}"
+    - "{{ etcd_client_port }}"
+    - "{{ etcd_peer_port }}"
+
+- name: Allow client-facing HAProxy ports from application subnets
+  ansible.posix.firewalld:
+    rich_rule: >-
+      rule family="ipv4" source address="{{ item.0 }}"
+      port port="{{ item.1 }}" protocol="tcp" accept
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ (app_allowed_cidrs + [cluster_network_cidr]) | unique | product([haproxy_write_port, haproxy_read_port, haproxy_stats_port]) | list }}"
+
+- name: Allow VRRP between cluster nodes (keepalived)
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="ipv4" source address="{{ cluster_network_cidr }}" protocol value="vrrp" accept'
+    permanent: true
+    immediate: true
+    state: enabled
+  when: keepalived_on | bool
+
+# ---- ลบ rule ค้างจาก subnet เดิม (เช่นเคยรันด้วย CIDR ผิดแล้วแก้ทีหลัง) ----
+# แตะเฉพาะ rich rule ที่เป็น port/VRRP ของ cluster นี้และมี source ไม่อยู่ใน subnet ที่อนุญาต
+- name: List permanent rich rules
+  ansible.builtin.command: firewall-cmd --permanent --list-rich-rules
+  register: common_fw_rules
+  changed_when: false
+  check_mode: false
+  when: firewall_remove_stale_rules | bool
+
+- name: Remove stale cluster rules from subnets no longer allowed
+  vars:
+    common_fw_ports: >-
+      {{ [pg_port, patroni_restapi_port, etcd_client_port, etcd_peer_port,
+          haproxy_write_port, haproxy_read_port, haproxy_stats_port] | map('string') | join('|') }}
+    common_fw_allowed: "{{ (app_allowed_cidrs + [cluster_network_cidr]) | unique | map('regex_escape') | join('|') }}"
+  ansible.posix.firewalld:
+    rich_rule: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: disabled
+  loop: >-
+    {{ common_fw_rules.stdout_lines | default([])
+       | select('search', 'source address=')
+       | select('search', 'port port="(' ~ common_fw_ports ~ ')"|protocol value="vrrp"')
+       | reject('search', 'source address="(' ~ common_fw_allowed ~ ')"')
+       | list }}
+  when: firewall_remove_stale_rules | bool

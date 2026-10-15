@@ -1,0 +1,77 @@
+---
+# =====================================================================
+#  Detect target OS (Rocky Linux / RHEL 8, 9, 10) แล้วเลือก Python ของระบบให้ Ansible
+#
+#  ทำไมต้องมี: EL8/EL9 จะมี python3.12 ติดตั้งเพิ่ม (สำหรับ Patroni) และ Ansible
+#  auto-discovery จะเลือก python3.12 ก่อน — แต่ binding ของ dnf / SELinux / firewalld
+#  มีเฉพาะ Python ของระบบ (EL8 = /usr/libexec/platform-python, EL9/10 = /usr/bin/python3)
+#  จึงต้องกำหนด ansible_python_interpreter ให้ชัดเจน
+#
+#  ใช้ raw (ไม่ต้องมี Python) และ tag "always" → รันเสมอแม้ --tags haproxy หรือ --skip-tags preflight
+#  ถ้าต้องการกำหนด interpreter เอง: ใส่ ansible_python_interpreter ใน inventory/hosts.yml
+# =====================================================================
+- name: Detect target OS and select the system Python
+  hosts: pg_cluster
+  gather_facts: false
+  any_errors_fatal: true
+  check_mode: false
+  tags: [always]
+
+  tasks:
+    - name: Read /etc/os-release (raw — works before Python is chosen)
+      ansible.builtin.raw: >-
+        . /etc/os-release && printf 'OSREL|%s|%s|%s\n' "$ID" "$VERSION_ID" "$PRETTY_NAME"
+      become: false
+      register: os_release_raw
+      changed_when: false
+
+    - name: Parse OS release
+      vars:
+        os_fields: "{{ os_release_raw.stdout | regex_search('OSREL\\|([^|]*)\\|([^|]*)\\|([^\\r\\n]*)', '\\1', '\\2', '\\3') | default(['', '', ''], true) }}"
+      ansible.builtin.set_fact:
+        os_detected_id: "{{ os_fields[0] | lower }}"
+        os_detected_major: "{{ os_fields[1].split('.')[0] }}"
+        os_detected_name: "{{ os_fields[2] }}"
+
+    - name: Require Rocky Linux / RHEL (or compatible) 8, 9 or 10
+      ansible.builtin.assert:
+        that:
+          - os_detected_id in os_supported_ids
+          - os_detected_major in os_supported_major_versions
+        fail_msg: >-
+          {{ inventory_hostname }} runs "{{ os_detected_name | default('unknown', true) }}"
+          (ID={{ os_detected_id }}, major={{ os_detected_major }}). Supported: {{ os_supported_ids | join(', ') }}
+          major {{ os_supported_major_versions | join('/') }}. Set allow_unsupported_os=true to try anyway.
+        quiet: true
+      when: not allow_unsupported_os | bool
+
+    - name: All nodes must run the same EL major version
+      ansible.builtin.assert:
+        that: ansible_play_hosts | map('extract', hostvars, 'os_detected_major') | unique | list | length == 1
+        fail_msg: >-
+          Mixed EL major versions:
+          {{ dict(ansible_play_hosts | zip(ansible_play_hosts | map('extract', hostvars, 'os_detected_name'))) }}.
+          Streaming replicas need the same glibc (collations); upgrade all nodes to one major version
+          or set allow_mixed_os_versions=true if you know what you are doing.
+        quiet: true
+      run_once: true
+      when: not allow_mixed_os_versions | bool
+
+    # ansible-core 2.17+ จัดการ Python 3.6 ไม่ได้ และ dnf binding ของ EL8 มีเฉพาะ Python 3.6
+    - name: EL8 nodes need ansible-core 2.16 on the control node
+      ansible.builtin.assert:
+        that: os_detected_major != '8' or ansible_version.full is version('2.17', '<')
+        fail_msg: >-
+          {{ inventory_hostname }} is {{ os_detected_name }}: its system Python is 3.6 (the only Python with
+          dnf / SELinux / firewalld bindings on EL8) and ansible-core {{ ansible_version.full }} cannot manage Python 3.6.
+          On the control node run: pip install 'ansible-core>=2.16,<2.17'   (see docs/INSTALL.md)
+        quiet: true
+
+    - name: Use the OS system Python for Ansible modules
+      ansible.builtin.set_fact:
+        ansible_python_interpreter: "{{ os_system_python[os_detected_major] | default('/usr/bin/python3') }}"
+      when: ansible_python_interpreter is not defined
+
+    - name: Detected OS
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ os_detected_name }} → Ansible Python {{ ansible_python_interpreter }}"

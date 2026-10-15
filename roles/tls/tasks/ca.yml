@@ -1,0 +1,100 @@
+---
+# CA ของ cluster อยู่บน control node: <inventory>/pki/{ca.key, ca.csr, ca.crt}
+#   ca.key เข้ารหัสด้วย tls_ca_passphrase (vault_tls_ca_passphrase) → commit เข้า Git ได้เหมือน vault.yml
+#   ถ้าหาย ต้องออก cert ใหม่ทั้ง cluster + แจก ca.crt ใหม่ให้ app — จึงไม่ยอมสร้าง CA ใหม่เองถ้า node มี CA อยู่แล้ว
+- name: Read the CA certificate the node already trusts
+  ansible.builtin.slurp:
+    src: "{{ tls_ca_cert }}"
+  register: tls_node_ca
+  failed_when: false
+  check_mode: false
+
+- name: Create or check the cluster CA on the control node
+  delegate_to: localhost
+  run_once: true
+  become: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    # inventory ตั้ง ansible_become: true ให้ทุก host — ตัวแปรชนะ keyword become: false จึงต้องปิดด้วยตัวแปร
+    # (control node ไม่ต้องใช้ sudo และ user ที่รัน Ansible อาจ sudo ไม่ได้แบบไม่ถามรหัส)
+    ansible_become: false
+    tls_nodes_with_ca: >-
+      {{ ansible_play_hosts | map('extract', hostvars, 'tls_node_ca')
+         | selectattr('content', 'defined') | list | length }}
+  block:
+    - name: Look for the CA certificate in {{ tls_pki_dir }}
+      ansible.builtin.stat:
+        path: "{{ tls_pki_dir }}/ca.crt"
+      register: tls_ca_local
+
+    - name: Refuse to create a second CA while the nodes already trust one
+      ansible.builtin.assert:
+        that: tls_ca_local.stat.exists or (tls_nodes_with_ca | int) == 0 or (tls_allow_ca_change | bool)
+        fail_msg: >-
+          {{ tls_nodes_with_ca }} node(s) already have {{ tls_ca_cert }}, but {{ tls_pki_dir }}/ca.crt is missing
+          on this control node. Copy the pki/ directory (ca.crt + ca.key) from the control node or Git
+          repository that set up the cluster. Only if that CA is lost for good: set tls_allow_ca_change=true
+          to create a new CA and re-issue every certificate (applications must then trust the new ca.crt).
+        quiet: true
+
+    - name: Create the PKI directory
+      ansible.builtin.file:
+        path: "{{ tls_pki_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: CA private key (encrypted with tls_ca_passphrase)
+      community.crypto.openssl_privatekey:
+        path: "{{ tls_pki_dir }}/ca.key"
+        passphrase: "{{ tls_ca_passphrase }}"
+        cipher: auto
+        format: pkcs8
+        type: "{{ tls_key_type }}"
+        size: "{{ tls_key_size if tls_key_type == 'RSA' else omit }}"
+        curve: "{{ 'secp384r1' if tls_key_type == 'ECC' else omit }}"
+        mode: "0600"
+      no_log: true
+
+    - name: CA signing request
+      community.crypto.openssl_csr:
+        path: "{{ tls_pki_dir }}/ca.csr"
+        privatekey_path: "{{ tls_pki_dir }}/ca.key"
+        privatekey_passphrase: "{{ tls_ca_passphrase }}"
+        common_name: "{{ tls_ca_common_name }}"
+        use_common_name_for_san: false
+        basic_constraints: ["CA:TRUE", "pathlen:0"]
+        basic_constraints_critical: true
+        key_usage: [keyCertSign, cRLSign]
+        key_usage_critical: true
+        mode: "0644"
+      no_log: true
+
+    - name: Self-signed CA certificate
+      community.crypto.x509_certificate:
+        path: "{{ tls_pki_dir }}/ca.crt"
+        csr_path: "{{ tls_pki_dir }}/ca.csr"
+        privatekey_path: "{{ tls_pki_dir }}/ca.key"
+        privatekey_passphrase: "{{ tls_ca_passphrase }}"
+        provider: selfsigned
+        selfsigned_not_after: "+{{ tls_ca_valid_days }}d"
+        mode: "0644"
+      no_log: true
+
+    - name: Re-check the CA certificate
+      ansible.builtin.stat:
+        path: "{{ tls_pki_dir }}/ca.crt"
+      register: tls_ca_local
+
+- name: Refuse to swap the CA the node already trusts
+  vars:
+    tls_ca_text: "{{ lookup('ansible.builtin.file', tls_pki_dir ~ '/ca.crt') if tls_ca_local.stat.exists else '' }}"
+  ansible.builtin.assert:
+    that: >-
+      tls_node_ca.content is not defined or (tls_allow_ca_change | bool)
+      or (tls_node_ca.content | b64decode | trim) == (tls_ca_text | trim)
+    fail_msg: >-
+      {{ tls_ca_cert }} on {{ inventory_hostname }} differs from {{ tls_pki_dir }}/ca.crt on this control node.
+      You are probably using a different pki/ directory than the one that set up the cluster.
+      Restore the original pki/ (or set tls_allow_ca_change=true to re-issue everything with this CA).
+    quiet: true
+  when: tls_ca_local.stat.exists

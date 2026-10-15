@@ -1,0 +1,22 @@
+---
+# เวอร์ชันจาก AppStream ของ OS (เก่ากว่า upstream แต่ได้ security update จาก vendor)
+#   EL9 = 2.4, EL10 = 3.0 | EL8 = 1.8 ซึ่งไม่รองรับ "http-check send" / "log stdout" ที่ config นี้ใช้
+- name: HAProxy from AppStream needs EL9 or newer
+  ansible.builtin.assert:
+    that: el_major | int >= 9
+    fail_msg: >-
+      EL{{ el_major }} AppStream ships HAProxy 1.8, which cannot run this configuration
+      (http-check send, log stdout). Use haproxy_install_method: source on EL8.
+    quiet: true
+
+- name: Install HAProxy from AppStream
+  ansible.builtin.dnf:
+    name: haproxy
+    state: "{{ package_state }}"
+  notify: Reload haproxy
+
+- name: Remove unit override left by a previous source install
+  ansible.builtin.file:
+    path: /etc/systemd/system/haproxy.service
+    state: absent
+  notify: Restart haproxy

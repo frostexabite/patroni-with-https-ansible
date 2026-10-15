@@ -1,0 +1,48 @@
+---
+- name: Install HAProxy ({{ haproxy_install_method }})
+  ansible.builtin.include_tasks: "install_{{ haproxy_install_method }}.yml"
+
+- name: Install socat (saves HAProxy server state before each reload)
+  ansible.builtin.dnf:
+    name: socat
+    state: "{{ package_state }}"
+
+- name: Allow HAProxy to bind/connect to any port (SELinux)
+  ansible.posix.seboolean:
+    name: haproxy_connect_any
+    state: true
+    persistent: true
+  when: ansible_facts['selinux']['status'] | default('disabled') != 'disabled'
+
+- name: HAProxy certificate and config
+  ansible.builtin.import_tasks: config.yml
+
+- name: Start HAProxy
+  ansible.builtin.systemd_service:
+    name: haproxy
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Flush handlers (apply HAProxy changes before port check)
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for write/read ports
+  ansible.builtin.wait_for:
+    port: "{{ item }}"
+    host: "{{ node_ip }}"
+    timeout: 30
+  loop:
+    - "{{ haproxy_write_port }}"
+    - "{{ haproxy_read_port }}"
+
+- name: Report running HAProxy version
+  ansible.builtin.command: "{{ haproxy_bin }} -v"
+  register: haproxy_running_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Show HAProxy version
+  ansible.builtin.debug:
+    msg: "{{ haproxy_running_version.stdout_lines | default(['HAProxy not installed yet'], true) | first }}"

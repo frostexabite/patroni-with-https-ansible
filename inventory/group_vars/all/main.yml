@@ -1,0 +1,246 @@
+---
+# =====================================================================
+#  PostgreSQL HA (Patroni + etcd + HAProxy + keepalived)
+#  รองรับ Rocky Linux / RHEL 8, 9, 10 (AlmaLinux / Oracle Linux ตระกูลเดียวกันใช้ได้ด้วย)
+#  ค่า default / tuning ของ cluster
+#  ค่าของไซต์ (IP, subnet, VIP) อยู่ที่ inventory/hosts.yml — ไม่ต้องแก้ไฟล์นี้
+#  TLS (CA ของ cluster) เปิดเป็นค่าเริ่มต้น — ดูหัวข้อ TLS ด้านล่าง และ docs/TLS.md
+#    ใส่ IP แบบถาม-ตอบ: python3 scripts/setup-inventory.py
+#
+#  เวอร์ชันทั้งหมดเป็นเวอร์ชันล่าสุด (stable) ณ 2026-10-12
+#    PostgreSQL 18.6 (PGDG หรือ AppStream) | 19 ยังเป็น Beta
+#    etcd 3.7.2 | Patroni 4.1.5 | psycopg 3.3.6
+#    HAProxy 3.4.6 (LTS) | keepalived 2.4.3        | build จาก source
+#  อัปเดตเวอร์ชัน: แก้ตัวแปร *_version ด้านล่าง แล้วรัน playbook ซ้ำ
+# =====================================================================
+
+# ---------- Network ----------
+# cluster_network_cidr / app_allowed_cidrs / keepalived_vip → inventory/hosts.yml
+node_ip: "{{ ansible_host | default(inventory_hostname) }}"   # IP ที่ใช้คุยกันภายใน cluster
+manage_etc_hosts: true
+set_hostname: true
+
+# ---------- OS ----------
+# ID จาก /etc/os-release ที่รองรับ (rocky = Rocky Linux, rhel = Red Hat Enterprise Linux)
+os_supported_ids: [rocky, rhel, almalinux, ol]
+os_supported_major_versions: ["8", "9", "10"]
+allow_unsupported_os: false                   # true = ข้ามการตรวจ OS (เช่น CentOS Stream) — ใช้ค่าตาม major version
+allow_mixed_os_versions: false                # true = ยอมให้ node ต่าง major version กัน (ไม่แนะนำ: glibc/collation ต่างกัน)
+el_major: "{{ ansible_facts['distribution_major_version'] | string }}"
+
+# Python ของระบบที่มี binding ของ dnf / SELinux / firewalld — Ansible ต้องใช้ตัวนี้
+# playbooks/detect_os.yml ตั้ง ansible_python_interpreter ให้อัตโนมัติ (ถ้าไม่ได้กำหนดเองใน inventory)
+os_system_python:
+  "8": /usr/libexec/platform-python           # Python 3.6 → control node ต้องใช้ ansible-core 2.16
+  "9": /usr/bin/python3                       # Python 3.9
+  "10": /usr/bin/python3                      # Python 3.12
+os_system_python_setuptools:
+  "8": platform-python-setuptools
+  "9": python3-setuptools
+  "10": python3-setuptools
+
+selinux_state: permissive                     # enforcing | permissive (ต้นฉบับใช้ setenforce 0)
+firewall_enabled: true                        # เปิด firewalld และเปิดเฉพาะ port ที่จำเป็น
+firewall_remove_stale_rules: true             # ลบ rich rule ของ port cluster ที่มาจาก subnet เก่า (เช่นหลังเปลี่ยน CIDR)
+package_state: latest                         # latest = dnf ติดตั้ง/อัปเดตเป็นเวอร์ชันล่าสุดเสมอ
+os_update_all: true                           # dnf upgrade ทุกแพ็กเกจของ OS (ไม่ reboot ให้ — แจ้งเตือนถ้าต้อง reboot)
+build_src_dir: /usr/local/src                 # ที่เก็บ source สำหรับ build HAProxy/keepalived
+
+# ---------- PostgreSQL ----------
+pg_version: 18                                # major ล่าสุดที่เป็น GA (minor ล่าสุดตาม package_state)
+pg_data_dir: "/var/lib/pgsql/{{ pg_version }}/data"
+# แหล่งติดตั้ง:
+#   auto      = EL10 → appstream (postgresql18 ของ OS) | EL8/EL9 → pgdg (AppStream ของ EL8/9 ไม่มี/มีไม่ครบทุก minor)
+#   pgdg      = PostgreSQL.org repo ทุก version (binary อยู่ /usr/pgsql-<ver>/bin)
+#   appstream = แพ็กเกจของ OS (binary อยู่ /usr/bin) — EL8/9 ใช้ module stream postgresql:<ver>
+# ห้ามเปลี่ยนแหล่งบน cluster ที่รันอยู่แล้ว (bin_dir เปลี่ยน)
+pg_install_source: auto
+pg_install_source_effective: >-
+  {{ pg_install_source if pg_install_source != 'auto'
+     else ('appstream' if (el_major | int) >= 10 else 'pgdg') }}
+pg_bin_dir: "{{ '/usr/bin' if pg_install_source_effective == 'appstream' else '/usr/pgsql-' ~ pg_version ~ '/bin' }}"
+# ชื่อแพ็กเกจ: pgdg = postgresql18-* | EL10 AppStream = postgresql18-* (ยกเว้นเวอร์ชันหลักของ OS)
+#              EL8/9 AppStream = postgresql-* (เลือกเวอร์ชันด้วย module stream)
+pg_appstream_el10_default_version: 16         # เวอร์ชันที่ EL10 ใช้ชื่อแพ็กเกจ "postgresql" เฉย ๆ
+pg_pkg_prefix: >-
+  {{ ('postgresql' ~ pg_version)
+     if (pg_install_source_effective == 'pgdg'
+         or ((el_major | int) >= 10 and (pg_version | int) != (pg_appstream_el10_default_version | int)))
+     else 'postgresql' }}
+pg_packages:
+  - "{{ pg_pkg_prefix }}"
+  - "{{ pg_pkg_prefix }}-server"
+  - "{{ pg_pkg_prefix }}-contrib"
+pg_port: 5432
+pg_superuser: postgres
+pg_superuser_password: "{{ vault_pg_superuser_password }}"
+pg_replication_user: replicator
+pg_replication_password: "{{ vault_pg_replication_password }}"
+pg_rewind_user: rewind_user
+pg_rewind_password: "{{ vault_pg_rewind_password }}"
+pgdg_repo_base: https://download.postgresql.org/pub/repos/yum/reporpms
+pgdg_repo_el: "EL-{{ el_major }}-{{ ansible_facts['architecture'] }}"
+pgdg_repo_rpm_url: "{{ pgdg_repo_base }}/{{ pgdg_repo_el }}/pgdg-redhat-repo-latest.noarch.rpm"
+pgdg_gpg_key_base: https://download.postgresql.org/pub/repos/yum/keys
+pgdg_gpg_key_urls: >-
+  {{ [pgdg_gpg_key_base ~ '/PGDG-RPM-GPG-KEY-RHEL']
+     + ([pgdg_gpg_key_base ~ '/PGDG-RPM-GPG-KEY-AARCH64-RHEL'] if ansible_facts['architecture'] == 'aarch64' else []) }}
+pgdg_repo_priority: 1                         # PGDG ชนะแพ็กเกจชื่อซ้ำใน AppStream (EL10 มี postgresql18 ทั้งสองที่)
+# EL10: dnf ไม่มีค่า $releasever_minor บน Rocky/Oracle → URL PGDG กลายเป็น "rhel-10.-x86_64" (404)
+# จึงแทนด้วย rhel-<major>-$basearch | EL8/9 ใช้ $releasever ตามปกติ (รองรับ RHEL ที่ล็อก minor/EUS)
+pgdg_pin_major_baseurl: "{{ (el_major | int) >= 10 }}"
+
+# พารามิเตอร์ที่เก็บใน DCS (ใช้ตอน bootstrap ครั้งแรกเท่านั้น
+# หลังจากนั้นให้แก้ด้วย `patronictl edit-config`)
+pg_dcs_parameters:
+  wal_level: replica
+  hot_standby: "on"
+  max_connections: 200
+  max_wal_senders: 10
+  max_replication_slots: 10
+  wal_keep_size: 128MB
+  wal_log_hints: "on"
+  password_encryption: scram-sha-256
+
+# พารามิเตอร์ local ของแต่ละ node (เปลี่ยนแล้วรัน --tags patroni → Patroni reload ให้;
+# ตัวที่ต้อง restart เช่น logging_collector จะขึ้น "Pending restart" ใน `pctl list -e`)
+pg_local_parameters:
+  unix_socket_directories: /run/postgresql
+  logging_collector: "on"                     # log อยู่ที่ <data_dir>/log/
+  log_directory: log
+  log_filename: postgresql-%a.log
+  log_truncate_on_rotation: "on"
+  log_rotation_age: 1d
+  log_rotation_size: "0"
+  log_line_prefix: "%m [%p] %q%u@%d "
+
+# พารามิเตอร์ SSL ของ PostgreSQL (เพิ่มให้อัตโนมัติเมื่อ tls_enabled — เปลี่ยนแล้ว reload ได้ ไม่ต้อง restart)
+pg_tls_parameters:
+  ssl: "on"
+  ssl_cert_file: "{{ tls_node_cert }}"
+  ssl_key_file: "{{ tls_postgres_key }}"
+  ssl_ca_file: "{{ tls_ca_cert }}"
+  ssl_min_protocol_version: "{{ tls_min_protocol }}"
+
+# ---------- etcd ----------
+etcd_version: v3.7.2                          # cluster เดิมต้องอยู่ >= v3.6.11 ก่อนอัปเป็น 3.7
+etcd_client_port: 2379
+etcd_peer_port: 2380
+etcd_peer_port_tmp: 2381                      # ใช้ชั่วคราวเฉพาะตอน playbooks/enable-tls.yml ย้าย peer เป็น https
+etcd_cluster_token: patroni-etcd-cluster
+etcd_data_dir: /var/lib/etcd
+# air-gapped: วาง tarball บนเครื่อง control node แล้วระบุ path (ไม่ต้องโหลดจาก GitHub)
+etcd_tarball_local_path: ""
+
+# ---------- Patroni ----------
+cluster_scope: postgres-cluster
+cluster_namespace: /db/
+patroni_version: 4.1.5
+psycopg_version: 3.3.6                        # ต้องใช้ Python >= 3.10
+# Python สำหรับ venv ของ Patroni แยกตาม major version
+#   EL8 (3.6) / EL9 (3.9) เก่าเกินไปสำหรับ psycopg 3.3 → ใช้ python3.12 จาก AppStream (EL 8.10 / 9.4 ขึ้นไป)
+#   ถ้า RHEL 9.2–9.3 ที่ยังไม่มี python3.12 ให้เปลี่ยนเป็น python3.11 / python3.11-pip / /usr/bin/python3.11
+patroni_python_by_major:
+  "8": { packages: [python3.12, python3.12-pip], bin: /usr/bin/python3.12 }
+  "9": { packages: [python3.12, python3.12-pip], bin: /usr/bin/python3.12 }
+  "10": { packages: [python3, python3-pip], bin: /usr/bin/python3 }
+patroni_python_default: { packages: [python3, python3-pip], bin: /usr/bin/python3 }
+patroni_python_packages: "{{ (patroni_python_by_major[el_major] | default(patroni_python_default)).packages }}"
+patroni_python: "{{ (patroni_python_by_major[el_major] | default(patroni_python_default)).bin }}"
+patroni_venv: /opt/patroni
+patroni_config_dir: /etc/patroni
+patroni_config_file: "{{ patroni_config_dir }}/patroni.yml"
+patroni_restapi_port: 8008
+patroni_restapi_username: patroni
+patroni_restapi_password: "{{ vault_patroni_restapi_password }}"
+patroni_bootstrap_node: "{{ groups['pg_cluster'][0] }}"
+patroni_pip_extra_args: ""                    # เช่น "--index-url https://pypi.internal/simple"
+patroni_dcs:
+  ttl: 30
+  loop_wait: 10
+  retry_timeout: 10
+  maximum_lag_on_failover: 1048576
+patroni_replica_wait_retries: 120             # x 10s รอ replica clone เสร็จ (DB ใหญ่ให้เพิ่ม)
+patroni_bootstrap_wait_retries: 60            # x 5s รอ Leader ตัวแรก bootstrap เสร็จ
+
+# ---------- HAProxy ----------
+haproxy_install_method: source                # source = build เวอร์ชันล่าสุดจาก haproxy.org | package = จาก AppStream (EL9+ เท่านั้น)
+haproxy_version: 3.4.6
+haproxy_branch: "{{ haproxy_version.split('.')[:2] | join('.') }}"
+haproxy_download_url: "https://www.haproxy.org/download/{{ haproxy_branch }}/src/haproxy-{{ haproxy_version }}.tar.gz"
+haproxy_make_options: "TARGET=linux-glibc USE_OPENSSL=1 USE_PCRE2=1 USE_PCRE2_JIT=1 USE_PROMEX=1"
+haproxy_bin: "{{ '/usr/local/sbin/haproxy' if haproxy_install_method == 'source' else '/usr/sbin/haproxy' }}"
+haproxy_write_port: 5000
+haproxy_read_port: 5001
+haproxy_stats_port: 7000
+haproxy_maxconn: 1000
+haproxy_backend_maxconn: 100
+haproxy_read_check_uri: /replica              # หรือ /read-only (รวม primary ด้วย)
+haproxy_stats_user: admin
+haproxy_stats_password: "{{ vault_haproxy_stats_password }}"
+
+# ---------- keepalived (VIP) ----------
+# keepalived_enabled / keepalived_vip / keepalived_vip_prefix / keepalived_router_id / keepalived_interface
+#   → inventory/hosts.yml (ห้ามประกาศซ้ำในไฟล์นี้ — group_vars/all มี precedence สูงกว่า group vars ใน hosts.yml)
+keepalived_install_method: source             # source = build จาก Git tag ล่าสุด | package = จาก AppStream
+keepalived_version: 2.4.3
+keepalived_git_repo: https://github.com/acassen/keepalived.git
+keepalived_git_commit: 53701f5648fb457fce5c3417fd309f286fbd1335   # commit ของ tag v2.4.3 (ตรวจความถูกต้องของ source)
+keepalived_configure_options: "--prefix=/usr/local --sysconfdir=/etc --disable-lvs"
+keepalived_bin: "{{ '/usr/local/sbin/keepalived' if keepalived_install_method == 'source' else '/usr/sbin/keepalived' }}"
+# ค่าที่ใช้จริง (internal) — มาจาก hosts.yml ถ้ามี ไม่งั้นใช้ค่า default
+keepalived_on: "{{ keepalived_enabled | default(true) | bool }}"
+keepalived_vrid: "{{ keepalived_router_id | default(51) }}"   # ต้องไม่ซ้ำกับ VRRP group อื่นใน L2 เดียวกัน
+# interface: ถ้าไม่กำหนด keepalived_interface ใน hosts.yml จะใช้ interface ที่มี node_ip อยู่
+# (หาไม่เจอ → interface ของ default route)
+keepalived_iface: "{{ keepalived_interface | default(keepalived_interface_auto, true) }}"
+keepalived_interface_auto: >-
+  {%- set ns = namespace(dev=(ansible_facts['default_ipv4'] | default({})).get('interface', '')) -%}
+  {%- for i in ansible_facts['interfaces'] | default([]) -%}
+  {%- set f = ansible_facts[i | replace('-', '_')] | default({}) -%}
+  {%- set addrs = [(f.get('ipv4') or {}).get('address', '')] + ((f.get('ipv4_secondaries') or []) | map(attribute='address') | list) -%}
+  {%- if node_ip in addrs -%}{%- set ns.dev = f.get('device', i) -%}{%- endif -%}
+  {%- endfor -%}
+  {{ ns.dev }}
+keepalived_unicast: true                      # unicast VRRP (เหมาะกับ VM/cloud ที่ block multicast)
+keepalived_auth_pass: "{{ vault_keepalived_auth_pass }}"   # ใช้ได้สูงสุด 8 ตัวอักษร
+
+# ---------- TLS / SSL (CA ของ cluster เอง — roles/tls) ----------
+# true = เข้ารหัสทุกช่องทาง: app/replication → PostgreSQL, Patroni REST API (+ HAProxy health check),
+#        etcd client/peer (mutual TLS) และหน้า HAProxy stats
+# CA สร้างบน control node ครั้งแรกที่รัน: <inventory>/pki/ca.crt + ca.key (key เข้ารหัสด้วย vault_tls_ca_passphrase)
+# private key ของแต่ละ node สร้างบน node เองและไม่เคยออกจากเครื่อง (control node แค่เซ็น CSR)
+# cluster ที่ deploy แบบไม่มี TLS ไปแล้ว: ห้ามรัน site.yml ตรง ๆ — ใช้ playbooks/enable-tls.yml (docs/TLS.md)
+tls_enabled: true
+tls_pki_dir: "{{ inventory_dir }}/pki"        # บน control node — commit เข้า Git ได้ (ca.key ถูกเข้ารหัส)
+tls_ca_passphrase: "{{ vault_tls_ca_passphrase }}"
+tls_ca_common_name: "{{ cluster_scope }} Root CA"
+tls_ca_valid_days: 3650                       # อายุ CA (10 ปี)
+tls_cert_valid_days: 825                      # อายุ cert ของ node (~2 ปี)
+tls_cert_renew_days: 30                       # รัน playbook ภายใน N วันก่อนหมดอายุ → ออก cert ใหม่ให้อัตโนมัติ
+tls_key_type: RSA                             # RSA | ECC (secp384r1)
+tls_key_size: 3072                            # ใช้กับ RSA เท่านั้น
+# ชื่อเพิ่มเติมที่ app ใช้ต่อ (ใส่ลงใน cert ทุก node) เช่น DNS ของ VIP:
+#   tls_extra_sans: ["DNS:pgdb.example.local", "IP:10.10.20.5"]
+tls_extra_sans: []
+tls_dir: /etc/pki/pgha                        # ที่เก็บ cert บน node
+tls_ca_cert: "{{ tls_dir }}/ca.crt"
+tls_node_cert: "{{ tls_dir }}/node.crt"
+tls_node_key: "{{ tls_dir }}/node.key"        # root 0600 (etcdctl, ต้นฉบับของ key)
+tls_postgres_key: "{{ tls_dir }}/postgres.key"   # postgres 0600 (PostgreSQL + Patroni)
+tls_etcd_key: "{{ tls_dir }}/etcd.key"        # etcd 0600
+tls_haproxy_pem: "{{ tls_dir }}/haproxy.pem"  # cert + key สำหรับหน้า stats
+tls_min_protocol: TLSv1.2
+# false = PostgreSQL รับทั้ง SSL และไม่ SSL (ช่วงย้าย app) | true = บังคับ SSL (hostssl + reject ที่เหลือ)
+tls_postgres_enforce: false
+# sslmode ที่ Patroni ใช้ต่อ PostgreSQL ด้วยกันเอง (replication / pg_rewind / superuser)
+tls_postgres_internal_sslmode: verify-full
+# true = ยอมให้เปลี่ยน CA (ออก cert ใหม่ทั้ง cluster) — app ต้องใช้ ca.crt ใหม่
+tls_allow_ca_change: false
+# ค่าที่ role อื่นใช้ (ไม่ต้องแก้)
+tls_scheme: "{{ 'https' if tls_enabled | bool else 'http' }}"
+
+# ---------- Pre-flight (playbooks/preflight.yml) ----------
+preflight_check_internet: true                # ตรวจว่า node ออกไปยังแหล่งดาวน์โหลดที่จำเป็นได้
+preflight_check_vip_free: true                # ตรวจว่า VIP ยังไม่มีเครื่องอื่นใช้ (เฉพาะตอน VIP ยังไม่อยู่บน cluster)
+preflight_check_repos: true                   # ตรวจว่า repo ของ OS มีแพ็กเกจที่ต้องใช้ (python3.12, postgresql AppStream)

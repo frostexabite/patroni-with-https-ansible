@@ -1,0 +1,44 @@
+---
+# =====================================================================
+#  PostgreSQL HA cluster: etcd + Patroni + HAProxy + keepalived
+#  บน Rocky Linux / RHEL 8, 9, 10
+#
+#    python3 scripts/setup-inventory.py                           # ใส่ IP / VIP / subnet (ครั้งแรก)
+#    ansible-playbook site.yml --ask-vault-pass                   # ติดตั้ง/อัปเดตทั้งหมด
+#    ansible-playbook site.yml --ask-vault-pass --check --diff    # ดูว่าจะเปลี่ยนอะไร (ไม่แก้จริง)
+#    ansible-playbook site.yml --ask-vault-pass --tags haproxy    # เฉพาะบาง role
+#    ansible-playbook site.yml --ask-vault-pass --skip-tags preflight
+#
+#  ลำดับ: ตรวจ inventory → detect OS → preflight → common → postgresql → tls → etcd
+#         → patroni → haproxy → keepalived → verify
+#  TLS (tls_enabled): CA ของ cluster อยู่ที่ inventory/pki — cluster เดิมที่ยังไม่มี TLS ใช้ playbooks/enable-tls.yml
+#  (detect OS รันเสมอแม้ใช้ --tags/--skip-tags preflight เพราะต้องเลือก Python ของระบบให้ Ansible)
+# =====================================================================
+- name: Pre-flight checks
+  ansible.builtin.import_playbook: playbooks/preflight.yml
+
+- name: Deploy PostgreSQL HA cluster (Patroni / etcd / HAProxy / keepalived)
+  hosts: pg_cluster
+  gather_facts: true
+  any_errors_fatal: true
+
+  roles:
+    - role: common
+      tags: [common]
+    - role: postgresql
+      tags: [postgresql]
+    - role: tls
+      tags: [tls]
+    - role: etcd
+      tags: [etcd]
+    - role: patroni
+      tags: [patroni]
+    - role: haproxy
+      tags: [haproxy]
+    - role: keepalived
+      tags: [keepalived]
+      when: keepalived_on | bool
+
+- name: Verify cluster
+  ansible.builtin.import_playbook: playbooks/verify.yml
+  tags: [verify]

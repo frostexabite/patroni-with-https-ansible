@@ -1,0 +1,78 @@
+---
+# แหล่งติดตั้ง PostgreSQL (pg_install_source → pg_install_source_effective):
+#   auto      = EL10 → appstream | EL8/EL9 → pgdg
+#   appstream = แพ็กเกจของ OS binary อยู่ /usr/bin, ได้ security errata จาก Red Hat / Rocky
+#               EL8/9 = module stream postgresql:<ver> | EL10 = แพ็กเกจ postgresql<ver>
+#   pgdg      = แพ็กเกจของ PostgreSQL.org binary อยู่ /usr/pgsql-<ver>/bin (เหมือนกันทุก EL)
+- name: Validate pg_install_source
+  ansible.builtin.assert:
+    that: pg_install_source in ['auto', 'appstream', 'pgdg']
+    fail_msg: "pg_install_source must be 'auto', 'appstream' or 'pgdg'"
+    quiet: true
+
+- name: Show PostgreSQL install plan
+  ansible.builtin.debug:
+    msg: >-
+      EL{{ el_major }}: PostgreSQL {{ pg_version }} from {{ pg_install_source_effective }}
+      ({{ pg_packages | join(', ') }}) → {{ pg_bin_dir }}
+
+- name: Configure PostgreSQL package source ({{ pg_install_source_effective }})
+  ansible.builtin.include_tasks: "repo_{{ pg_install_source_effective }}.yml"
+
+- name: Install PostgreSQL {{ pg_version }}
+  block:
+    - name: Install latest PostgreSQL minor release of major {{ pg_version }}
+      ansible.builtin.dnf:
+        name: "{{ pg_packages }}"
+        state: "{{ package_state }}"
+        update_cache: true
+  rescue:
+    - name: Explain why PostgreSQL could not be installed
+      ansible.builtin.fail:
+        msg: >-
+          Could not install {{ pg_packages | join(', ') }} from {{ pg_install_source_effective }}
+          on EL{{ el_major }}: {{ ansible_failed_result.msg | default('') }}
+          {{ 'Hint: AppStream may not ship PostgreSQL ' ~ pg_version ~ ' on this release — set pg_install_source: pgdg.'
+             if pg_install_source_effective == 'appstream' else
+             'Hint: check that download.postgresql.org is reachable (proxy?) and that BaseOS/AppStream are enabled.' }}
+
+- name: Verify PostgreSQL binaries are where Patroni expects them
+  ansible.builtin.stat:
+    path: "{{ pg_bin_dir }}/postgres"
+  register: postgresql_bin
+
+- name: Fail with a clear message when binaries are elsewhere
+  ansible.builtin.assert:
+    that: postgresql_bin.stat.exists or ansible_check_mode
+    fail_msg: >-
+      {{ pg_bin_dir }}/postgres not found. Installed packages probably came from the other source.
+      Check with: dnf info --installed {{ pg_pkg_prefix }}-server | grep 'From repo'
+    quiet: true
+
+# Patroni เป็นผู้ควบคุม PostgreSQL — ห้ามให้ unit ของแพ็กเกจรันเอง
+- name: Make sure the packaged PostgreSQL units are disabled
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - postgresql
+    - "postgresql-{{ pg_version }}"
+  failed_when: false
+
+# ห้าม initdb เอง — Patroni จะ bootstrap data directory
+- name: Create data directory (empty, owned by postgres)
+  ansible.builtin.file:
+    path: "{{ pg_data_dir }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"
+
+- name: Create unix socket directory
+  ansible.builtin.file:
+    path: /run/postgresql
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0755"

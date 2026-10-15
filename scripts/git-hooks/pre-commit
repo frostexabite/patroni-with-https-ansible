@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# ป้องกันการ commit ไฟล์ vault ที่ยังไม่ได้เข้ารหัส
+# เปิดใช้:  git config core.hooksPath scripts/git-hooks
+set -euo pipefail
+
+status=0
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  if ! head -n1 "$f" | grep -q '^\$ANSIBLE_VAULT;'; then
+    echo "ERROR: $f is not encrypted. Run: ansible-vault encrypt $f" >&2
+    status=1
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACM | grep -E '(^|/)vault\.ya?ml$' || true)
+
+# CA key ของ cluster (inventory/pki/ca.key หรือ inventories/*/pki/ca.key) ต้องเข้ารหัสเสมอ
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  if ! grep -q 'ENCRYPTED PRIVATE KEY' "$f"; then
+    echo "ERROR: $f is an unencrypted private key. Never commit it." >&2
+    status=1
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACM | grep -E '(^|/)pki/.*\.key$' || true)
+
+exit $status
